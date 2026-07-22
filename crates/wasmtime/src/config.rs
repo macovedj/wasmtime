@@ -2452,8 +2452,9 @@ impl Config {
                     | WasmFeatures::FUNCTION_REFERENCES
                     | WasmFeatures::RELAXED_SIMD
                     | WasmFeatures::TAIL_CALL
-                    | WasmFeatures::GC_TYPES
-                    | WasmFeatures::EXCEPTIONS
+                    // SPIKE: EXCEPTIONS and GC_TYPES temporarily un-gated to
+                    // exercise the stage-0 uncatchable-traps prototype (tag
+                    // types appear to need GC_TYPES-mode type registration).
                     | WasmFeatures::LEGACY_EXCEPTIONS
                     | WasmFeatures::STACK_SWITCHING;
                 match self.compiler_target().architecture {
