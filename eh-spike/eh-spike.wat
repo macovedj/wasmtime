@@ -1,0 +1,10 @@
+(module
+  (tag $e (param i32))
+  (func (export "ok") (result i32)
+    (block $h (result i32)
+      (try_table (result i32) (catch $e $h)
+        (i32.const 7))))
+  (func (export "boom") (result i32)
+    (block $h (result i32)
+      (try_table (result i32) (catch $e $h)
+        (throw $e (i32.const 42))))))
