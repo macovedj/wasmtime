@@ -130,8 +130,7 @@ impl ABI for Aarch64ABI {
     fn sizeof(ty: &WasmValType) -> u8 {
         match ty {
             WasmValType::Ref(rt) => match rt.heap_type {
-                WasmHeapType::Func => Self::word_bytes(),
-                WasmHeapType::Extern => Self::word_bytes() / 2,
+                WasmHeapType::Func | WasmHeapType::Extern => Self::word_bytes(),
                 ht => unimplemented!("Support for WasmHeapType: {ht}"),
             },
             WasmValType::F64 | WasmValType::I64 => Self::word_bytes(),
