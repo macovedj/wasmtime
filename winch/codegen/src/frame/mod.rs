@@ -1,14 +1,15 @@
 use crate::{
     Result,
     abi::{ABI, ABIOperand, ABISig, LocalSlot, align_to},
-    codegen::{CodeGenPhase, Emission, Prologue},
+    codegen::{CodeGenError, CodeGenPhase, Emission, Prologue},
     masm::MacroAssembler,
 };
 use smallvec::SmallVec;
 use std::marker::PhantomData;
 use std::ops::Range;
 use wasmparser::{BinaryReader, FuncValidator, ValidatorResources};
-use wasmtime_environ::{TypeConvert, WasmValType};
+use wasmtime_core::bail;
+use wasmtime_environ::{TypeConvert, WasmHeapType, WasmValType};
 
 /// WebAssembly locals.
 // TODO:
@@ -61,6 +62,12 @@ impl DefinedLocals {
             validator.define_locals(position, count, ty)?;
 
             let ty = types.convert_valtype(ty)?;
+            // Only funcref locals are supported for reference types.
+            if let WasmValType::Ref(r) = &ty {
+                if r.heap_type != WasmHeapType::Func {
+                    bail!(CodeGenError::unsupported_wasm_type());
+                }
+            }
             for _ in 0..count {
                 let ty_size = <A as ABI>::sizeof(&ty);
                 next_stack = align_to(next_stack, ty_size as u32) + (ty_size as u32);

@@ -2448,12 +2448,15 @@ impl Config {
                 }
             }
             Some(Strategy::Winch) => {
+                // EXCEPTIONS and GC_TYPES stay enabled. Winch compiles
+                // `throw` as a trap instead of unwinding, and tag types need
+                // GC_TYPES to be registered even though no GC values are
+                // supported. Anything Winch can't handle fails with a
+                // compile error instead of a panic.
                 unsupported |= WasmFeatures::GC
                     | WasmFeatures::FUNCTION_REFERENCES
                     | WasmFeatures::RELAXED_SIMD
                     | WasmFeatures::TAIL_CALL
-                    | WasmFeatures::GC_TYPES
-                    | WasmFeatures::EXCEPTIONS
                     | WasmFeatures::LEGACY_EXCEPTIONS
                     | WasmFeatures::STACK_SWITCHING;
                 match self.compiler_target().architecture {
@@ -3013,6 +3016,20 @@ impl Config {
 
         if features.contains(WasmFeatures::RELAXED_SIMD) && !features.contains(WasmFeatures::SIMD) {
             bail!("cannot disable the simd proposal but enable the relaxed simd proposal");
+        }
+
+        // GC infrastructure (`Config::gc_support`) hosts the objects these
+        // proposals create, so it cannot be disabled while they are enabled.
+        if !features.contains(WasmFeatures::GC_TYPES) {
+            if features.contains(WasmFeatures::EXCEPTIONS) {
+                bail!("cannot disable gc support but enable the exceptions proposal");
+            }
+            if features.contains(WasmFeatures::GC) {
+                bail!("cannot disable gc support but enable the gc proposal");
+            }
+            if features.contains(WasmFeatures::FUNCTION_REFERENCES) {
+                bail!("cannot disable gc support but enable the function-references proposal");
+            }
         }
 
         if features.contains(WasmFeatures::STACK_SWITCHING) {
