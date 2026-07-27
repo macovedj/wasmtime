@@ -566,7 +566,7 @@ impl WastTest {
         // emits GC barriers.
         if config.compiler == Compiler::Winch
             && config.collector == Collector::DeferredReferenceCounting
-            && self.config.gc_types()
+            && (self.config.gc_types() || self.config.exceptions())
         {
             return true;
         }
@@ -585,7 +585,6 @@ impl WastTest {
                 // Currently exceptions trap on throw, re-enable after catch
                 // is implemented.
                 "misc_testsuite/traps-skip-catch-all.wast",
-                "misc_testsuite/component-model/async/exceptions.wast",
                 "spec_testsuite/throw.wast",
             ];
 

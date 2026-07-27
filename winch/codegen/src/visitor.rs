@@ -28,8 +28,8 @@ use wasmparser::{
 };
 use wasmtime_cranelift::{TRAP_INDIRECT_CALL_TO_NULL, TRAP_UNHANDLED_TAG};
 use wasmtime_environ::{
-    DataIndex, ElemIndex, FuncIndex, GlobalIndex, MemoryIndex, TableIndex, TypeIndex, WasmHeapType,
-    WasmValType,
+    DataIndex, ElemIndex, FuncIndex, GlobalIndex, MemoryIndex, TableIndex, TagIndex, TypeIndex,
+    WasmHeapType, WasmValType,
 };
 
 /// A macro to define unsupported WebAssembly operators.
@@ -1861,10 +1861,58 @@ where
         Ok(())
     }
 
-    // A thrown exception is compiled as an unhandled-tag trap; see
-    // `visit_try_table`.
-    fn visit_throw(&mut self, _tag_index: u32) -> Self::Output {
-        self.masm.trap(TRAP_UNHANDLED_TAG)?;
+    // A `throw` allocates an exception object with the `gc_alloc_exn`
+    // builtin and passes it to `throw_ref`, which roots it in the store
+    // and unwinds.
+    fn visit_throw(&mut self, tag_index: u32) -> Self::Output {
+        let tag_index = TagIndex::from_u32(tag_index);
+        let params = self.env.tag_params(tag_index)?;
+        let slots = params.len() as u32;
+
+        const SLOT_SIZE: u32 = 16;
+        self.masm.reserve_stack(slots * SLOT_SIZE)?;
+        let buffer_base = self.masm.sp_offset()?;
+        for i in (0..slots).rev() {
+            let val = self.context.pop_to_reg(self.masm, None)?;
+            let ty: OperandSize = params[i as usize].try_into()?;
+            let addr = self
+                .masm
+                .address_from_sp(SPOffset::from_u32(buffer_base.as_u32() - (i * SLOT_SIZE)))?;
+            self.masm.store(val.reg.into(), addr, ty)?;
+            self.context.free_reg(val);
+        }
+
+        let buffer_ptr = self.context.any_gpr(self.masm)?;
+        let addr = self.masm.address_from_sp(buffer_base)?;
+        self.masm
+            .compute_addr(addr, writable!(buffer_ptr), self.env.ptr_type().try_into()?)?;
+        let tag_reg = self.context.any_gpr(self.masm)?;
+        self.masm.mov(
+            writable!(tag_reg),
+            RegImm::i32(tag_index.as_u32() as i32),
+            OperandSize::S32,
+        )?;
+        self.context.stack.push(TypedReg::i32(tag_reg).into());
+        self.context
+            .stack
+            .push(TypedReg::new(self.env.ptr_type(), buffer_ptr).into());
+        let builtin = self.env.builtins.gc_alloc_exn::<M::ABI>()?;
+        FnCall::emit::<M>(
+            &mut self.env,
+            self.masm,
+            &mut self.context,
+            Callee::Builtin(builtin),
+        )?;
+
+        let builtin = self.env.builtins.throw_ref::<M::ABI>()?;
+        FnCall::emit::<M>(
+            &mut self.env,
+            self.masm,
+            &mut self.context,
+            Callee::Builtin(builtin),
+        )?;
+
+        self.masm.free_stack(slots * SLOT_SIZE)?;
         self.context.reachable = false;
         let outermost = &mut self.control_frames[0];
         outermost.set_as_target();

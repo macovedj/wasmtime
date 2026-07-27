@@ -2,8 +2,9 @@
 ;;! test = "winch"
 ;;! flags = ["-W", "exceptions"]
 
-;; Currently exceptions trap on throw: `throw` becomes a trap and
-;; `try_table` compiles as a plain block.
+;; A `throw` allocates the exception object with the `gc_alloc_exn`
+;; builtin and passes it to `throw_ref`. A `try_table` still compiles
+;; as a plain block.
 (module
   (tag $e (param i32))
   (func (result i32)
@@ -15,15 +16,40 @@
 ;;       movq    %rsp, %rbp
 ;;       movq    8(%rdi), %r11
 ;;       movq    0x18(%r11), %r11
-;;       addq    $0x10, %r11
+;;       addq    $0x30, %r11
 ;;       cmpq    %rsp, %r11
-;;       ja      0x3a
+;;       ja      0xbd
 ;;   1c: movq    %rdi, %r14
 ;;       subq    $0x10, %rsp
 ;;       movq    %rdi, 8(%rsp)
 ;;       movq    %rsi, (%rsp)
-;;       ud2
+;;       subq    $0x10, %rsp
+;;       movl    $0x2a, %eax
+;;       movl    %eax, (%rsp)
+;;       leaq    (%rsp), %rax
+;;       movl    $0, %ecx
+;;       subq    $4, %rsp
+;;       movl    %ecx, (%rsp)
+;;       pushq   %rax
+;;       subq    $4, %rsp
+;;       movq    %r14, %rdi
+;;       movl    0xc(%rsp), %esi
+;;       movq    4(%rsp), %rdx
+;;       callq   0x1ba
+;;       addq    $4, %rsp
+;;       addq    $0xc, %rsp
+;;       movq    0x18(%rsp), %r14
+;;       subq    $4, %rsp
+;;       movl    %eax, (%rsp)
+;;       subq    $0xc, %rsp
+;;       movq    %r14, %rdi
+;;       movl    0xc(%rsp), %esi
+;;       callq   0x173
+;;       addq    $0xc, %rsp
+;;       addq    $4, %rsp
+;;       movq    0x18(%rsp), %r14
+;;       addq    $0x10, %rsp
 ;;       addq    $0x10, %rsp
 ;;       popq    %rbp
 ;;       retq
-;;   3a: ud2
+;;   bd: ud2

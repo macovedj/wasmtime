@@ -101,8 +101,7 @@ fn dynamic_tags(config: &mut Config) -> Result<()> {
     Ok(())
 }
 
-// Currently exceptions trap on throw, re-enable after catch is implemented.
-#[wasmtime_test(strategies(not(Winch)), wasm_features(exceptions))]
+#[wasmtime_test(wasm_features(exceptions))]
 #[cfg_attr(miri, ignore)]
 fn exception_escape_to_host(config: &mut Config) -> Result<()> {
     let engine = Engine::new(config)?;
@@ -276,8 +275,7 @@ fn thrown_exception_without_throwing(config: &mut Config) -> Result<()> {
     Ok(())
 }
 
-// Currently exceptions trap on throw, re-enable after catch is implemented.
-#[wasmtime_test(strategies(not(Winch)), wasm_features(exceptions))]
+#[wasmtime_test(wasm_features(exceptions))]
 #[cfg_attr(miri, ignore)]
 fn wasm_exceptions_have_backtraces(config: &mut Config) -> Result<()> {
     let engine = Engine::new(config)?;
@@ -438,7 +436,7 @@ impl Drop for SetFlagOnDrop {
     }
 }
 
-#[wasmtime_test(wasm_features(exceptions))]
+#[wasmtime_test(strategies(not(Winch)), wasm_features(exceptions))]
 fn store_pending_exnref_has_write_barrier(config: &mut Config) -> wasmtime::Result<()> {
     config.collector(Collector::DeferredReferenceCounting);
     let engine = Engine::new(&config)?;
@@ -452,7 +450,6 @@ fn store_pending_exnref_has_write_barrier(config: &mut Config) -> wasmtime::Resu
 
     let dropped = Arc::new(AtomicBool::new(false));
 
-    eprintln!("a1");
 
     {
         let mut scope = RootScope::new(&mut store);
@@ -460,10 +457,8 @@ fn store_pending_exnref_has_write_barrier(config: &mut Config) -> wasmtime::Resu
         let exn1 = ExnRef::new(&mut scope, &exnpre, &tag, &[Val::ExternRef(Some(r))])?;
         let _ = scope.as_context_mut().throw::<()>(exn1);
     }
-    eprintln!("a2");
 
     store.gc(None)?;
-    eprintln!("a5");
     assert!(!dropped.load(Relaxed));
 
     {
@@ -471,10 +466,8 @@ fn store_pending_exnref_has_write_barrier(config: &mut Config) -> wasmtime::Resu
         let exn2 = ExnRef::new(&mut scope, &exnpre, &tag, &[Val::ExternRef(None)])?;
         let _ = scope.as_context_mut().throw::<()>(exn2);
     }
-    eprintln!("a3");
 
     store.gc(None)?;
-    eprintln!("a4");
     assert!(dropped.load(Relaxed));
 
     Ok(())

@@ -14,7 +14,8 @@ use wasmparser::BlockType;
 use wasmtime_environ::{
     BuiltinFunctionIndex, DefinedFuncIndex, FuncIndex, FuncKey, GlobalIndex, IndexType, Memory,
     MemoryIndex, ModuleTranslation, ModuleTypesBuilder, PrimaryMap, PtrSize, Table, TableIndex,
-    TypeConvert, TypeIndex, VMOffsets, WasmHeapType, WasmValType, collections::TryClone as _,
+    TagIndex, TypeConvert, TypeIndex, VMOffsets, WasmHeapType, WasmValType,
+    collections::TryClone as _,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -323,6 +324,20 @@ impl<'a, 'translation, 'data, P: PtrSize> FuncEnv<'a, 'translation, 'data, P> {
     /// Get a [`Table`] from a [`TableIndex`].
     pub fn table(&mut self, index: TableIndex) -> &Table {
         &self.translation.module.tables[index]
+    }
+
+    /// Returns the parameter types of the given tag, i.e. the payload types
+    /// carried by exceptions thrown with it.
+    pub fn tag_params(&mut self, index: TagIndex) -> Result<Vec<WasmValType>> {
+        let sig_index = self.translation.module.tags[index]
+            .signature
+            .unwrap_module_type_index();
+        Ok(self.types[sig_index]
+            .unwrap_func()
+            .params()
+            .iter()
+            .copied()
+            .collect())
     }
 
     /// Returns true if Spectre mitigations are enabled for heap bounds check.
