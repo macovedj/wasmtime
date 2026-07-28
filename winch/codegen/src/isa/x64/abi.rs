@@ -136,7 +136,7 @@ impl X64ABI {
     ) -> Result<(ABIOperand, u32)> {
         let (reg, ty) = match wasm_arg {
             ty @ WasmValType::Ref(rt) => match rt.heap_type {
-                WasmHeapType::Func | WasmHeapType::Extern => (
+                WasmHeapType::Func => (
                     Self::int_reg_for(index_env.next_gpr(), call_conv, params_or_returns),
                     ty,
                 ),
