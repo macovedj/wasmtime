@@ -501,7 +501,7 @@ impl WastTest {
     /// Returns whether this test exercises the GC types and might want to use
     /// multiple different garbage collectors.
     pub fn test_uses_gc_types(&self) -> bool {
-        self.config.gc() || self.config.function_references()
+        self.config.gc() || self.config.function_references() || self.config.exceptions()
     }
 
     /// Returns the optional spec proposal that this test is associated with.
