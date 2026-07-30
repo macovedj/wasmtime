@@ -65,6 +65,8 @@ use core::ptr::NonNull;
 #[cfg(feature = "threads")]
 use core::time::Duration;
 use wasmtime_core::math::WasmFloat;
+#[cfg(feature = "gc")]
+use wasmtime_environ::GlobalIndex;
 use wasmtime_environ::{
     CompiledTrap, DefinedMemoryIndex, DefinedTableIndex, FuncIndex, PassiveElemIndex, TableIndex,
     Trap,
@@ -1128,6 +1130,54 @@ fn cont_new(
 #[cfg(feature = "gc")]
 fn get_instance_id(_store: &mut dyn VMStore, instance: InstanceId) -> u32 {
     instance.as_u32()
+}
+
+#[cfg(feature = "gc")]
+fn gc_global_ptr(
+    store: &mut dyn VMStore,
+    instance: InstanceId,
+    global_index: u32,
+) -> core::ptr::NonNull<crate::vm::VMGlobalDefinition> {
+    let opaque = store.store_opaque();
+    let inst = opaque.instance(instance);
+    let global_index = GlobalIndex::from_u32(global_index);
+    match inst.env_module().defined_global_index(global_index) {
+        Some(def_index) => inst.global_ptr(def_index),
+        None => inst.imported_global(global_index).from.as_non_null(),
+    }
+}
+
+// Barriered read of a GC-typed global: the loaded reference is cloned and
+// exposed to Wasm, which is the read barrier.
+#[cfg(feature = "gc")]
+fn gc_global_get(store: &mut dyn VMStore, instance: InstanceId, global_index: u32) -> Result<u32> {
+    let def = gc_global_ptr(store, instance, global_index);
+    let opaque = store.store_opaque_mut();
+    // SAFETY: the definition pointer is valid for the instance's lifetime and
+    // the caller only passes indices of GC-typed globals.
+    let Some(gc_ref) = (unsafe { def.as_ref().as_gc_ref() }) else {
+        return Ok(0);
+    };
+    let gc_store = opaque.unwrap_gc_store_mut();
+    let cloned = gc_store.clone_gc_ref(gc_ref);
+    let raw = gc_store.expose_gc_ref_to_wasm(cloned)?;
+    Ok(raw.get())
+}
+
+// Barriered write of a GC-typed global; `write_gc_ref` is the collector's
+// write barrier.
+#[cfg(feature = "gc")]
+fn gc_global_set(
+    store: &mut dyn VMStore,
+    instance: InstanceId,
+    global_index: u32,
+    value: u32,
+) -> Result<()> {
+    let mut def = gc_global_ptr(store, instance, global_index);
+    let opaque = store.store_opaque_mut();
+    let new = VMGcRef::from_raw_u32(value);
+    // SAFETY: as in `gc_global_get`.
+    unsafe { def.as_mut().write_gc_ref(opaque, new.as_ref()) }
 }
 
 #[cfg(feature = "gc")]

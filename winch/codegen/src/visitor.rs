@@ -2065,6 +2065,23 @@ where
     fn visit_global_get(&mut self, global_index: u32) -> Self::Output {
         let index = GlobalIndex::from_u32(global_index);
         let (ty, base, offset) = self.emit_get_global_addr(index)?;
+        if self.gc_barrier_needed(&ty) {
+            // Barriered read through the `gc_global_get` builtin.
+            self.context.free_reg(base);
+            self.context.stack.push(Val::i32(global_index as i32));
+            let builtin = self.env.builtins.gc_global_get::<M::ABI>()?;
+            FnCall::emit::<M>(
+                &mut self.env,
+                self.masm,
+                &mut self.context,
+                Callee::Builtin(builtin),
+            )?;
+            // The builtin returns the raw reference widened to u64; retag it
+            // with the global's type so it participates in stack maps.
+            let result = self.context.pop_to_reg(self.masm, None)?;
+            self.context.stack.push(Val::reg(result.reg, ty));
+            return Ok(());
+        }
         let addr = self.masm.address_at_reg(base, offset)?;
         let dst = self.context.reg_for_type(ty, self.masm)?;
         self.masm.load(addr, writable!(dst), ty.try_into()?)?;
@@ -2078,6 +2095,22 @@ where
     fn visit_global_set(&mut self, global_index: u32) -> Self::Output {
         let index = GlobalIndex::from_u32(global_index);
         let (ty, base, offset) = self.emit_get_global_addr(index)?;
+        if self.gc_barrier_needed(&ty) {
+            // Barriered write through the `gc_global_set` builtin.
+            self.context.free_reg(base);
+            let val = self.context.pop_to_reg(self.masm, None)?;
+            self.context.stack.push(Val::i32(global_index as i32));
+            self.context.stack.push(TypedReg::i32(val.reg).into());
+            let builtin = self.env.builtins.gc_global_set::<M::ABI>()?;
+            FnCall::emit::<M>(
+                &mut self.env,
+                self.masm,
+                &mut self.context,
+                Callee::Builtin(builtin),
+            )?;
+            // Drop the builtin's bool result.
+            return self.visit_drop();
+        }
         let addr = self.masm.address_at_reg(base, offset)?;
 
         let typed_reg = self.context.pop_to_reg(self.masm, None)?;

@@ -432,7 +432,7 @@ impl Instance {
     }
 
     /// Return the indexed `VMGlobalImport`.
-    fn imported_global(&self, index: GlobalIndex) -> &VMGlobalImport {
+    pub(crate) fn imported_global(&self, index: GlobalIndex) -> &VMGlobalImport {
         unsafe { self.vmctx_plus_offset(self.offsets().vmctx_vmglobal_import(index)) }
     }
 

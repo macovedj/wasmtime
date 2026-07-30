@@ -170,6 +170,14 @@ macro_rules! foreach_builtin_function {
 
             // Process a debug breakpoint.
             breakpoint(vmctx: vmctx) -> bool;
+
+            // Barriered read of a GC-typed global.
+            #[cfg(feature = "gc")]
+            gc_global_get(vmctx: vmctx, global_index: u32) -> u64;
+
+            // Barriered write of a GC-typed global.
+            #[cfg(feature = "gc")]
+            gc_global_set(vmctx: vmctx, global_index: u32, value: u32) -> bool;
         }
     };
 }
@@ -398,6 +406,8 @@ impl BuiltinFunctionIndex {
             (@get cont_new pointer) => (TrapSentinel::Negative);
 
             (@get get_instance_id u32) => (return None);
+            // The raw GC reference in the low 32 bits is never negative.
+            (@get gc_global_get u64) => (TrapSentinel::Negative);
 
             // Bool-returning functions use `false` as an indicator of a trap.
             (@get $name:ident bool) => (TrapSentinel::Falsy);

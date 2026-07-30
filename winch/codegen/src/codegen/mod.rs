@@ -2097,6 +2097,16 @@ where
 
     /// Emits a series of instructions that load the `fuel_consumed` field from
     /// `VMStoreContext`.
+    /// Whether an access to a value of type `ty` needs GC barriers under
+    /// the configured collector. Only the deferred reference-counting
+    /// collector requires barriers.
+    pub fn gc_barrier_needed(&self, ty: &WasmValType) -> bool {
+        matches!(
+            self.tunables.collector,
+            Some(wasmtime_environ::Collector::DeferredReferenceCounting)
+        ) && ty.is_vmgcref_type_and_not_i31()
+    }
+
     fn emit_load_fuel_consumed(&mut self, fuel_reg: Reg) -> Result<()> {
         let store_context_offset = self.env.vmoffsets.ptr.vmctx_store_context();
         let fuel_offset = self.env.vmoffsets.ptr.vmstore_context_fuel_consumed();
