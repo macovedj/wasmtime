@@ -1663,7 +1663,9 @@ where
         match slot.ty {
             I32 | I64 | F32 | F64 | V128 => context.stack.push(Val::local(index, slot.ty)),
             Ref(rt) => match rt.heap_type {
-                WasmHeapType::Func => context.stack.push(Val::local(index, slot.ty)),
+                WasmHeapType::Func | WasmHeapType::Extern => {
+                    context.stack.push(Val::local(index, slot.ty))
+                }
                 _ => bail!(CodeGenError::unsupported_wasm_type()),
             },
         }
@@ -2121,7 +2123,7 @@ where
 
     fn visit_ref_null(&mut self, hty: HeapType) -> Self::Output {
         match hty {
-            HeapType::FUNC => {
+            HeapType::FUNC | HeapType::EXTERN => {
                 let ptr_type = self.env.ptr_type();
                 match ptr_type {
                     WasmValType::I64 => self.context.stack.push(Val::i64(0)),

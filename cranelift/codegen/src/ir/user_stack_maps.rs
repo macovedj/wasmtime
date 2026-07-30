@@ -171,6 +171,26 @@ impl UserStackMap {
         }
     }
 
+    /// Construct a stack map from offsets that are already relative to the
+    /// stack pointer at the safepoint.
+    ///
+    /// For compilers that track their frame layout directly and do not use
+    /// Cranelift's stack slots. The resulting map is already finalized.
+    pub fn from_sp_offsets(offsets: impl IntoIterator<Item = u32>) -> Self {
+        let offsets: alloc::vec::Vec<u32> = offsets.into_iter().collect();
+        let max = offsets.iter().max().copied().unwrap_or(0);
+        let mut bitset = CompoundBitSet::with_capacity(usize::try_from(max).unwrap() + 1);
+        for offset in offsets {
+            bitset.insert(usize::try_from(offset).unwrap());
+        }
+        let mut by_type = SmallVec::<[(ir::Type, CompoundBitSet); 1]>::default();
+        by_type.push((ir::types::I32, bitset));
+        UserStackMap {
+            by_type,
+            sp_to_sized_stack_slots: Some(0),
+        }
+    }
+
     /// Finalize this stack map by filling in the SP-to-stack-slots offset.
     pub(crate) fn finalize(&mut self, sp_to_sized_stack_slots: u32) {
         debug_assert!(self.sp_to_sized_stack_slots.is_none());

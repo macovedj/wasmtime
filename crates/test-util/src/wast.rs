@@ -454,7 +454,6 @@ impl Compiler {
                     || config.tail_call()
                     || config.function_references()
                     || config.relaxed_simd()
-                    || config.gc_types()
                     || config.exceptions()
                     || config.legacy_exceptions()
                     || config.stack_switching()
@@ -569,16 +568,10 @@ impl WastTest {
                 "extended-const/elem.wast",
                 "extended-const/global.wast",
                 "misc_testsuite/component-model/modules.wast",
-                "misc_testsuite/externref-id-function.wast",
-                "misc_testsuite/externref-segment.wast",
                 "misc_testsuite/externref-segments.wast",
                 "misc_testsuite/externref-table-dropped-segment-issue-8281.wast",
-                "misc_testsuite/linking-errors.wast",
                 "misc_testsuite/many_table_gets_lead_to_gc.wast",
-                "misc_testsuite/mutable_externref_globals.wast",
-                "misc_testsuite/no-mixup-stack-maps.wast",
                 "misc_testsuite/no-panic.wast",
-                "misc_testsuite/simple_ref_is_null.wast",
             ];
 
             if unsupported.iter().any(|part| self.path.ends_with(part)) {
