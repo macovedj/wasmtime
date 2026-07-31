@@ -77,3 +77,60 @@ fn winch_externref_sole_ref_across_gc() -> wasmtime::Result<()> {
     }
     Ok(())
 }
+
+/// The barrier probe: a Winch frame stores the *only* reference into a
+/// global, a collection runs, and the global is read back.
+///
+/// Under DRC this requires the write barrier: the plain store leaves the
+/// object's reference count unaware of the global, so the next collection
+/// frees it and `global.get` returns a dangling reference. Null and copying
+/// need no barrier and exercise Winch's plain-store path.
+#[test]
+fn winch_global_barrier_across_gc() -> wasmtime::Result<()> {
+    for collector in [
+        wasmtime::Collector::Null,
+        wasmtime::Collector::DeferredReferenceCounting,
+        wasmtime::Collector::Copying,
+    ] {
+        let mut config = wasmtime::Config::new();
+        config.strategy(wasmtime::Strategy::Winch);
+        config.collector(collector);
+        let engine = wasmtime::Engine::new(&config)?;
+        let module = wasmtime::Module::new(
+            &engine,
+            r#"
+            (module
+              (import "" "make" (func $make (result externref)))
+              (import "" "gc" (func $gc))
+              (global $g (mut externref) (ref.null extern))
+              (func (export "run") (result externref)
+                (global.set $g (call $make))
+                (call $gc)
+                (global.get $g)))
+            "#,
+        )?;
+        let mut store = wasmtime::Store::new(&engine, ());
+        let make = wasmtime::Func::wrap(
+            &mut store,
+            |mut cx: wasmtime::Caller<'_, ()>| -> wasmtime::Result<
+                Option<wasmtime::Rooted<wasmtime::ExternRef>>,
+            > { Ok(Some(wasmtime::ExternRef::new(&mut cx, 0xDEADBEEFu32)?)) },
+        );
+        let gc = wasmtime::Func::wrap(&mut store, |mut cx: wasmtime::Caller<'_, ()>| {
+            let _ = cx.gc(None);
+        });
+        let instance = wasmtime::Instance::new(&mut store, &module, &[make.into(), gc.into()])?;
+        let run = instance.get_typed_func::<(), Option<wasmtime::Rooted<wasmtime::ExternRef>>>(
+            &mut store, "run",
+        )?;
+        let out = run
+            .call(&mut store, ())?
+            .expect("global should not be null");
+        let got = out
+            .data(&store)?
+            .and_then(|d| d.downcast_ref::<u32>().copied());
+        println!("{collector:?}: returned {got:#x?}");
+        assert_eq!(got, Some(0xDEADBEEF), "under {collector:?}");
+    }
+    Ok(())
+}
