@@ -28,8 +28,8 @@ use wasmparser::{
 };
 use wasmtime_cranelift::TRAP_INDIRECT_CALL_TO_NULL;
 use wasmtime_environ::{
-    DataIndex, ElemIndex, FuncIndex, GlobalIndex, MemoryIndex, TableIndex, TypeIndex, WasmHeapType,
-    WasmValType,
+    DataIndex, ElemIndex, FuncIndex, GlobalIndex, MemoryIndex, PtrSize, TableIndex, TypeIndex,
+    WasmHeapType, WasmValType,
 };
 
 /// A macro to define unsupported WebAssembly operators.
@@ -2063,6 +2063,11 @@ where
     }
 
     fn visit_global_get(&mut self, global_index: u32) -> Self::Output {
+        // TODO: under the DRC collector a ref loaded from a global must
+        // be enrolled in the over-approximated stack-roots list (the read
+        // barrier). Without it, a get-then-overwrite sequence can free a
+        // value still live on the stack. The read barrier lands with its
+        // own change; the stack map alone covers the common case.
         let index = GlobalIndex::from_u32(global_index);
         let (ty, base, offset) = self.emit_get_global_addr(index)?;
         let addr = self.masm.address_at_reg(base, offset)?;
@@ -2078,6 +2083,122 @@ where
     fn visit_global_set(&mut self, global_index: u32) -> Self::Output {
         let index = GlobalIndex::from_u32(global_index);
         let (ty, base, offset) = self.emit_get_global_addr(index)?;
+        if self.gc_barrier_needed(&ty) {
+            // DRC write barrier, emitted inline, mirroring cranelift's
+            // `translate_write_gc_reference` (func_environ/gc/drc.rs).
+            // Increment the new value's reference count, store it, then
+            // decrement the old value's count, dropping it through the
+            // existing `drop_gc_ref` builtin if the count reaches zero.
+            //
+            // TODO: bounds-check the heap accesses, as cranelift's
+            // `prepare_gc_ref_access` does.
+            let val = self.context.pop_to_reg(self.masm, None)?;
+            // Spill so that both branch paths around the cold `drop_gc_ref`
+            // call observe the same frame state.
+            self.context.spill(self.masm)?;
+
+            let old = self.context.any_gpr(self.masm)?;
+            let slot = self.masm.address_at_reg(base, offset)?;
+            self.masm.load(slot, writable!(old), OperandSize::S32)?;
+
+            // Load the GC heap base out of the store context.
+            let heap = self.context.any_gpr(self.masm)?;
+            let sc = u32::from(self.env.vmoffsets.ptr.vmctx_store_context());
+            let hb = u32::from(self.env.vmoffsets.ptr.vmstore_context_gc_heap_base());
+            let addr = self.masm.address_at_vmctx(sc)?;
+            self.masm.load_ptr(addr, writable!(heap))?;
+            let addr = self.masm.address_at_reg(heap, hb)?;
+            self.masm.load_ptr(addr, writable!(heap))?;
+
+            let tmp = self.context.any_gpr(self.masm)?;
+            let cnt = self.context.any_gpr(self.masm)?;
+            let rc = self.env.vmoffsets.vm_drc_header_ref_count();
+            let skip_inc = self.masm.get_label()?;
+            let drop_old = self.masm.get_label()?;
+            let done = self.masm.get_label()?;
+
+            // Increment the new value's count unless it is null or i31.
+            self.masm.branch(
+                IntCmpKind::Eq,
+                val.reg,
+                RegImm::i32(0),
+                skip_inc,
+                OperandSize::S32,
+            )?;
+            self.masm
+                .mov(writable!(tmp), val.reg.into(), OperandSize::S32)?;
+            self.masm
+                .and(writable!(tmp), tmp, RegImm::i32(1), OperandSize::S32)?;
+            self.masm.branch(
+                IntCmpKind::Ne,
+                tmp,
+                RegImm::i32(0),
+                skip_inc,
+                OperandSize::S32,
+            )?;
+            self.masm
+                .mov(writable!(tmp), heap.into(), OperandSize::S64)?;
+            self.masm
+                .add(writable!(tmp), tmp, val.reg.into(), OperandSize::S64)?;
+            let addr = self.masm.address_at_reg(tmp, rc)?;
+            self.masm.load(addr, writable!(cnt), OperandSize::S64)?;
+            self.masm
+                .add(writable!(cnt), cnt, RegImm::i64(1), OperandSize::S64)?;
+            let addr = self.masm.address_at_reg(tmp, rc)?;
+            self.masm.store(cnt.into(), addr, OperandSize::S64)?;
+            self.masm.bind(skip_inc)?;
+
+            // Store the new value into the global.
+            let slot = self.masm.address_at_reg(base, offset)?;
+            self.masm.store(val.reg.into(), slot, OperandSize::S32)?;
+            self.context.free_reg(val);
+            self.context.free_reg(base);
+
+            // Decrement the old value's count unless it is null or i31,
+            // dropping it if the count reaches zero.
+            self.masm
+                .branch(IntCmpKind::Eq, old, RegImm::i32(0), done, OperandSize::S32)?;
+            self.masm
+                .mov(writable!(tmp), old.into(), OperandSize::S32)?;
+            self.masm
+                .and(writable!(tmp), tmp, RegImm::i32(1), OperandSize::S32)?;
+            self.masm
+                .branch(IntCmpKind::Ne, tmp, RegImm::i32(0), done, OperandSize::S32)?;
+            self.masm
+                .mov(writable!(tmp), heap.into(), OperandSize::S64)?;
+            self.masm
+                .add(writable!(tmp), tmp, old.into(), OperandSize::S64)?;
+            let addr = self.masm.address_at_reg(tmp, rc)?;
+            self.masm.load(addr, writable!(cnt), OperandSize::S64)?;
+            self.masm
+                .sub(writable!(cnt), cnt, RegImm::i64(1), OperandSize::S64)?;
+            self.masm.branch(
+                IntCmpKind::Eq,
+                cnt,
+                RegImm::i64(0),
+                drop_old,
+                OperandSize::S64,
+            )?;
+            let addr = self.masm.address_at_reg(tmp, rc)?;
+            self.masm.store(cnt.into(), addr, OperandSize::S64)?;
+            self.masm.jmp(done)?;
+
+            self.masm.bind(drop_old)?;
+            self.context.stack.push(TypedReg::i32(old).into());
+            let builtin = self.env.builtins.drop_gc_ref::<M::ABI>()?;
+            FnCall::emit::<M>(
+                &mut self.env,
+                self.masm,
+                &mut self.context,
+                Callee::Builtin(builtin),
+            )?;
+
+            self.masm.bind(done)?;
+            self.context.free_reg(heap);
+            self.context.free_reg(tmp);
+            self.context.free_reg(cnt);
+            return Ok(());
+        }
         let addr = self.masm.address_at_reg(base, offset)?;
 
         let typed_reg = self.context.pop_to_reg(self.masm, None)?;
