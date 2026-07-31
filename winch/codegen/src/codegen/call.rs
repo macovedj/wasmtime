@@ -101,6 +101,42 @@ impl FnCall {
             Ok((kind, sig.call_conv))
         })?;
 
+        // SPIKE: record a stack map for this safepoint. The spill above
+        // parked every live value in a frame slot, so GC refs on the value
+        // stack are enumerable from compile-time state alone. Ref-typed
+        // locals are not covered yet.
+        let sp = masm.sp_offset()?;
+        let needs_map = |ty: &wasmtime_environ::WasmValType| {
+            ty.is_vmgcref_type_and_not_i31()
+                && match ty {
+                    wasmtime_environ::WasmValType::Ref(r) => !r.heap_type.is_bottom(),
+                    _ => false,
+                }
+        };
+        let mut map_offsets: Vec<u32> = context
+            .stack
+            .inner()
+            .iter()
+            .filter_map(|v| match v {
+                Val::Memory(m) if needs_map(&m.ty) => Some(sp.as_u32() - m.slot.offset.as_u32()),
+                _ => None,
+            })
+            .collect();
+        // Ref-typed locals are also live roots. Stack arguments are
+        // addressed from the frame pointer and live in the caller's frame,
+        // outside this map's span.
+        map_offsets.extend(
+            context
+                .frame
+                .locals()
+                .filter(|slot| slot.addressed_from_sp() && needs_map(&slot.ty))
+                .map(|slot| sp.as_u32() - slot.offset),
+        );
+
+        if !map_offsets.is_empty() {
+            masm.emit_stack_map(sp, &map_offsets)?;
+        }
+
         Self::cleanup(
             sig,
             &callee_context,
