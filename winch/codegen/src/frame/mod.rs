@@ -250,6 +250,12 @@ impl Frame<Prologue> {
 }
 
 impl Frame<Emission> {
+    /// Returns an iterator over all the [`LocalSlot`]s in the frame,
+    /// including the [`SpecialLocals`].
+    pub fn locals(&self) -> impl Iterator<Item = &LocalSlot> {
+        self.special_locals.iter().chain(self.wasm_locals.iter())
+    }
+
     /// Get the [`LocalSlot`] for a WebAssembly local.
     /// This method assumes that the index is bound to u32::MAX, representing
     /// the index space for WebAssembly locals.
