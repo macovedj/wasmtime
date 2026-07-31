@@ -2450,11 +2450,14 @@ impl Config {
                 }
             }
             Some(Strategy::Winch) => {
+                // GC_TYPES is enabled: Winch supports GC reference values
+                // (externref) on the value stack, with stack maps, under the
+                // barrier-free collectors. The deferred reference-counting
+                // collector is refused below until barriers are implemented.
                 unsupported |= WasmFeatures::GC
                     | WasmFeatures::FUNCTION_REFERENCES
                     | WasmFeatures::RELAXED_SIMD
                     | WasmFeatures::TAIL_CALL
-                    | WasmFeatures::GC_TYPES
                     | WasmFeatures::EXCEPTIONS
                     | WasmFeatures::LEGACY_EXCEPTIONS
                     | WasmFeatures::STACK_SWITCHING;
@@ -2730,6 +2733,18 @@ impl Config {
         } else {
             None
         };
+
+        // Winch does not yet emit GC write/read barriers, which the deferred
+        // reference-counting collector requires. The null and copying
+        // collectors need no barriers, so GC types are supported under them.
+        #[cfg(feature = "gc")]
+        if tunables.winch_callable
+            && tunables.collector == Some(wasmtime_environ::Collector::DeferredReferenceCounting)
+        {
+            bail!(
+                "the Winch compiler does not yet support the deferred                  reference-counting collector with GC types; use the null or                  copying collector"
+            );
+        }
 
         if tunables.debug_guest {
             ensure!(

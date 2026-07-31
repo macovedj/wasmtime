@@ -3788,3 +3788,55 @@ fn initial_size_larger_than_reservation() -> Result<()> {
 
     Ok(())
 }
+
+/// Under Winch, a frame holding the only reference to an `externref` across a
+/// collection must keep it alive — the stack map covers the frame slot. Runs
+/// under the barrier-free collectors that Winch supports.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn winch_externref_survives_gc_in_frame() -> Result<()> {
+    for collector in [Collector::Null, Collector::Copying] {
+        let mut config = Config::new();
+        config.strategy(Strategy::Winch);
+        config.collector(collector);
+        // Skip targets where Winch isn't available.
+        let Ok(engine) = Engine::new(&config) else {
+            return Ok(());
+        };
+        let module = Module::new(
+            &engine,
+            r#"
+            (module
+              (import "" "make" (func $make (result externref)))
+              (import "" "gc" (func $gc))
+              (func (export "hold") (result externref)
+                ;; the only reference to the object is on this frame's value
+                ;; stack while the collection runs
+                (call $make)
+                (call $gc)))
+            "#,
+        )?;
+        let mut store = Store::new(&engine, ());
+        let make = Func::wrap(
+            &mut store,
+            |mut cx: Caller<'_, ()>| -> Result<Option<Rooted<ExternRef>>> {
+                Ok(Some(ExternRef::new(&mut cx, 0xDECAFu32)?))
+            },
+        );
+        let gc = Func::wrap(&mut store, |mut cx: Caller<'_, ()>| {
+            let _ = cx.gc(None);
+        });
+        let instance = Instance::new(&mut store, &module, &[make.into(), gc.into()])?;
+        let hold = instance.get_typed_func::<(), Option<Rooted<ExternRef>>>(&mut store, "hold")?;
+        let out = hold.call(&mut store, ())?.expect("must not be null");
+        let got = out
+            .data(&store)?
+            .and_then(|d| d.downcast_ref::<u32>().copied());
+        assert_eq!(
+            got,
+            Some(0xDECAF),
+            "externref did not survive GC under {collector:?}"
+        );
+    }
+    Ok(())
+}
