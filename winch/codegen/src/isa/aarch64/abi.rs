@@ -130,7 +130,11 @@ impl ABI for Aarch64ABI {
     fn sizeof(ty: &WasmValType) -> u8 {
         match ty {
             WasmValType::Ref(rt) => match rt.heap_type {
+                // Funcrefs are pointers; externrefs are 32-bit `VMGcRef`
+                // indices, matching Cranelift's representation so layouts
+                // shared across the ABI boundary agree.
                 WasmHeapType::Func => Self::word_bytes(),
+                WasmHeapType::Extern => Self::word_bytes() / 2,
                 ht => unimplemented!("Support for WasmHeapType: {ht}"),
             },
             WasmValType::F64 | WasmValType::I64 => Self::word_bytes(),
@@ -211,6 +215,26 @@ mod tests {
         WasmFuncType,
         WasmValType::{self, *},
     };
+
+    #[test]
+    fn ref_sizes_match_cranelift_representation() {
+        use wasmtime_environ::{WasmHeapType, WasmRefType};
+        let ty = |heap_type| {
+            WasmValType::Ref(WasmRefType {
+                nullable: true,
+                heap_type,
+            })
+        };
+        // Funcrefs are pointers; externrefs are 32-bit `VMGcRef`s. These
+        // sizes are shared with Cranelift-compiled trampolines through
+        // call frames and return areas, so they must match Cranelift's
+        // `reference_type`.
+        assert_eq!(
+            Aarch64ABI::sizeof(&ty(WasmHeapType::Func)),
+            Aarch64ABI::word_bytes()
+        );
+        assert_eq!(Aarch64ABI::sizeof(&ty(WasmHeapType::Extern)), 4);
+    }
 
     #[test]
     fn xreg_abi_sig() -> Result<()> {
