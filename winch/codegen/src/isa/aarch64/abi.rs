@@ -130,7 +130,7 @@ impl ABI for Aarch64ABI {
     fn sizeof(ty: &WasmValType) -> u8 {
         match ty {
             WasmValType::Ref(rt) => match rt.heap_type {
-                WasmHeapType::Func => Self::word_bytes(),
+                WasmHeapType::Func | WasmHeapType::Extern => Self::word_bytes(),
                 ht => unimplemented!("Support for WasmHeapType: {ht}"),
             },
             WasmValType::F64 | WasmValType::I64 => Self::word_bytes(),
@@ -211,6 +211,16 @@ mod tests {
         WasmFuncType,
         WasmValType::{self, *},
     };
+
+    #[test]
+    fn externref_is_word_sized() {
+        use wasmtime_environ::{WasmHeapType, WasmRefType};
+        let externref = WasmValType::Ref(WasmRefType {
+            nullable: true,
+            heap_type: WasmHeapType::Extern,
+        });
+        assert_eq!(Aarch64ABI::sizeof(&externref), Aarch64ABI::word_bytes());
+    }
 
     #[test]
     fn xreg_abi_sig() -> Result<()> {
