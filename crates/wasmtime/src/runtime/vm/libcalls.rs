@@ -56,13 +56,7 @@
 
 use crate::bail_bug;
 use crate::prelude::*;
-#[cfg(feature = "gc")]
-use crate::runtime::store::AutoAssertNoGc;
 use crate::runtime::store::{Asyncness, InstanceId, StoreOpaque};
-#[cfg(feature = "gc")]
-use crate::runtime::types::StorageType;
-#[cfg(feature = "gc")]
-use crate::runtime::values::Val;
 #[cfg(feature = "gc")]
 use crate::runtime::vm::VMGcRef;
 use crate::runtime::vm::{self, HostResultHasUnwindSentinel, VMStore, f32x4, f64x2, i8x16};
@@ -74,10 +68,6 @@ use wasmtime_core::math::WasmFloat;
 use wasmtime_environ::{
     CompiledTrap, DefinedMemoryIndex, DefinedTableIndex, FuncIndex, PassiveElemIndex, TableIndex,
     Trap,
-};
-#[cfg(feature = "gc")]
-use wasmtime_environ::{
-    EngineOrModuleTypeIndex, TagIndex, VMSharedTypeIndex, WasmCompositeInnerType,
 };
 #[cfg(feature = "wmemcheck")]
 use wasmtime_wmemcheck::AccessError::{
@@ -1138,100 +1128,6 @@ fn cont_new(
 #[cfg(feature = "gc")]
 fn get_instance_id(_store: &mut dyn VMStore, instance: InstanceId) -> u32 {
     instance.as_u32()
-}
-
-// Allocate and initialize an exception object for a compiled `throw`.
-// Cranelift emits this inline per collector. Winch does not emit GC code,
-// so it calls this builtin instead. `payloads` points to one `ValRaw` per
-// tag parameter, in declaration order.
-#[cfg(feature = "gc")]
-fn gc_alloc_exn(
-    store: &mut dyn VMStore,
-    instance: InstanceId,
-    tag_index: u32,
-    payloads: *mut u8,
-) -> Result<core::num::NonZeroU32> {
-    let (exn_shared_ty, tag_instance, tag_defined) = {
-        let opaque = store.store_opaque();
-        let inst = opaque.instance(instance);
-        let tag_index = TagIndex::from_u32(tag_index);
-        let exn_shared_ty: VMSharedTypeIndex = match inst.env_module().tags[tag_index].exception {
-            EngineOrModuleTypeIndex::Engine(i) => i,
-            EngineOrModuleTypeIndex::Module(i) => inst.engine_type_index(i),
-            EngineOrModuleTypeIndex::RecGroup(_) => {
-                unreachable!("tag exception types are never rec-group-relative here")
-            }
-        };
-        let (tag_instance, tag_defined) = inst
-            .get_exported_tag(opaque.id(), tag_index)
-            .to_raw_indices();
-        (exn_shared_ty, tag_instance, tag_defined)
-    };
-
-    let engine = store.engine().clone();
-    let layout = engine
-        .signatures()
-        .layout(exn_shared_ty)
-        .expect("exception types always have a GC layout");
-    let struct_layout = layout.unwrap_struct();
-    let sub_ty = engine
-        .signatures()
-        .borrow(exn_shared_ty)
-        .expect("registered exception type");
-    let field_types: Vec<_> = match &sub_ty.composite_type.inner {
-        WasmCompositeInnerType::Exn(e) => e.fields.iter().copied().collect(),
-        _ => unreachable!("tag's exception type is always an exn type"),
-    };
-
-    // Decode the payloads into owned values before allocating, since
-    // allocation may cross a fiber boundary.
-    let field_tys: Vec<StorageType> = field_types
-        .iter()
-        .map(|f| StorageType::from_wasm_storage_type(&engine, &f.element_type))
-        .collect();
-    let vals: Vec<Val> = {
-        let mut store = AutoAssertNoGc::new(store.store_opaque_mut());
-        field_tys
-            .iter()
-            .enumerate()
-            .map(|(i, ty)| {
-                let raw = unsafe { *payloads.cast::<crate::ValRaw>().add(i) };
-                unsafe { Val::_from_raw(&mut store, raw, &ty.unpack()) }
-            })
-            .collect()
-    };
-
-    let (mut limiter, store) = store.resource_limiter_and_store_opaque();
-    let raw = block_on!(store, async |store, asyncness| {
-        let exnref = store
-            .retry_after_gc_async(limiter.as_mut(), (), asyncness, |store, ()| {
-                store
-                    .unwrap_gc_store_mut()
-                    .alloc_uninit_exn(exn_shared_ty, &struct_layout)?
-                    .map_err(|bytes_needed| crate::GcHeapOutOfMemory::new((), bytes_needed).into())
-            })
-            .await?;
-
-        let mut store = AutoAssertNoGc::new(store);
-        let init = (|store: &mut AutoAssertNoGc| -> Result<()> {
-            exnref.initialize_tag(store, tag_instance, tag_defined)?;
-            for (i, (ty, val)) in field_tys.iter().zip(vals.iter()).enumerate() {
-                exnref.initialize_field(store, &struct_layout, ty, i, val.clone())?;
-            }
-            Ok(())
-        })(&mut store);
-
-        if let Err(e) = init {
-            let _ = store.require_gc_store_mut()?.dealloc_uninit_exn(exnref);
-            return Err(e);
-        }
-
-        store
-            .unwrap_gc_store_mut()
-            .expose_gc_ref_to_wasm(exnref.into())
-    })??;
-
-    Ok(raw)
 }
 
 #[cfg(feature = "gc")]

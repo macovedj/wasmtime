@@ -171,9 +171,6 @@ macro_rules! foreach_builtin_function {
             // Process a debug breakpoint.
             breakpoint(vmctx: vmctx) -> bool;
 
-            // Allocate and initialize an exception object for a `throw`.
-            #[cfg(feature = "gc")]
-            gc_alloc_exn(vmctx: vmctx, tag_index: u32, payloads: pointer) -> u32;
         }
     };
 }
@@ -369,7 +366,6 @@ impl BuiltinFunctionIndex {
             // GC allocation functions return a u32 which is zero to indicate a
             // trap.
             (@get gc_alloc_raw u32) => (TrapSentinel::Falsy);
-            (@get gc_alloc_exn u32) => (TrapSentinel::Falsy);
             (@get array_new_data u32) => (TrapSentinel::Falsy);
             (@get array_new_elem u32) => (TrapSentinel::Falsy);
 

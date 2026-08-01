@@ -450,7 +450,6 @@ fn store_pending_exnref_has_write_barrier(config: &mut Config) -> wasmtime::Resu
 
     let dropped = Arc::new(AtomicBool::new(false));
 
-
     {
         let mut scope = RootScope::new(&mut store);
         let r = ExternRef::new(&mut scope, SetFlagOnDrop(dropped.clone()))?;
@@ -473,23 +472,73 @@ fn store_pending_exnref_has_write_barrier(config: &mut Config) -> wasmtime::Resu
     Ok(())
 }
 
-// Winch does not support exnref values yet. Modules that place an exnref
-// in a value position should fail with a compile error instead of
-// panicking.
+// exnref is an ordinary GC reference on the value stack: locals are
+// frame slots covered by stack maps like any other reference type.
 #[wasmtime_test(strategies(only(Winch)), wasm_features(exceptions, reference_types))]
 #[cfg_attr(miri, ignore)]
-fn exnref_local_is_unsupported(config: &mut Config) -> Result<()> {
+fn exnref_local_is_supported(config: &mut Config) -> Result<()> {
     let engine = Engine::new(config)?;
     let wat = r#"
         (module
-          (func (result i32)
+          (func (export "f") (result i32)
             (local exnref)
-            (i32.const 0)))
+            (i32.const 7)))
     "#;
-    let err = Module::new(&engine, wat).unwrap_err();
-    assert!(
-        format!("{err:?}").contains("Unsupported Wasm type"),
-        "unexpected error: {err:?}"
+    let module = Module::new(&engine, wat)?;
+    let mut store = Store::new(&engine, ());
+    let instance = Instance::new(&mut store, &module, &[])?;
+    let f = instance.get_typed_func::<(), i32>(&mut store, "f")?;
+    assert_eq!(f.call(&mut store, ())?, 7);
+    Ok(())
+}
+
+// A thrown externref payload must come back intact: the reference is
+// live across the exception allocation (stack map) and lands in a
+// 32-bit `VMGcRef` field of the exception object.
+#[wasmtime_test(wasm_features(exceptions, reference_types))]
+#[cfg_attr(miri, ignore)]
+fn throw_externref_payload_roundtrip(config: &mut Config) -> Result<()> {
+    let engine = Engine::new(config)?;
+    let mut store = Store::new(&engine, ());
+
+    let module = Module::new(
+        &engine,
+        r#"
+        (module
+          (tag $e (export "e") (param i32 externref))
+          (func (export "throw") (param externref)
+            (throw $e (i32.const 42) (local.get 0))))
+        "#,
+    )?;
+    let instance = Instance::new(&mut store, &module, &[])?;
+    let tag = instance
+        .get_export(&mut store, "e")
+        .unwrap()
+        .into_tag()
+        .unwrap();
+    let func = instance.get_func(&mut store, "throw").unwrap();
+
+    let payload = ExternRef::new(&mut store, 0xBEEFu32)?;
+    let mut results = [];
+    let result = func.call(
+        &mut store,
+        &[Val::ExternRef(Some(payload))],
+        &mut results[..],
     );
+    assert!(result.unwrap_err().is::<ThrownException>());
+
+    let exn = store.take_pending_exception().unwrap();
+    let exntag = exn.tag(&mut store)?;
+    assert!(Tag::eq(&exntag, &tag, &store));
+    assert_eq!(exn.field(&mut store, 0)?.unwrap_i32(), 42);
+    let r = exn
+        .field(&mut store, 1)?
+        .unwrap_externref()
+        .copied()
+        .unwrap();
+    let data = r
+        .data(&store)?
+        .and_then(|d| d.downcast_ref::<u32>().copied());
+    assert_eq!(data, Some(0xBEEF));
     Ok(())
 }

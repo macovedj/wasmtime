@@ -26,10 +26,12 @@ use wasmparser::{
     BlockType, BrTable, HeapType, Ieee32, Ieee64, MemArg, TryTable, V128, ValType, VisitOperator,
     VisitSimdOperator,
 };
-use wasmtime_cranelift::{TRAP_INDIRECT_CALL_TO_NULL, TRAP_UNHANDLED_TAG};
+use wasmtime_cranelift::TRAP_INDIRECT_CALL_TO_NULL;
 use wasmtime_environ::{
-    DataIndex, ElemIndex, FuncIndex, GlobalIndex, MemoryIndex, TableIndex, TagIndex, TypeIndex,
-    WasmHeapType, WasmValType,
+    Collector, DataIndex, ElemIndex, FuncIndex, GcTypeLayouts, GlobalIndex, MemoryIndex, PtrSize,
+    TableIndex, TagIndex, TypeIndex, VMGcKind, WasmCompositeInnerType, WasmHeapType, WasmValType,
+    copying::{CopyingTypeLayouts, InlineTraceInfo},
+    null::NullTypeLayouts,
 };
 
 /// A macro to define unsupported WebAssembly operators.
@@ -1666,7 +1668,7 @@ where
         match slot.ty {
             I32 | I64 | F32 | F64 | V128 => context.stack.push(Val::local(index, slot.ty)),
             Ref(rt) => match rt.heap_type {
-                WasmHeapType::Func | WasmHeapType::Extern => {
+                WasmHeapType::Func | WasmHeapType::Extern | WasmHeapType::Exn => {
                     context.stack.push(Val::local(index, slot.ty))
                 }
                 _ => bail!(CodeGenError::unsupported_wasm_type()),
@@ -1861,42 +1863,84 @@ where
         Ok(())
     }
 
-    // A `throw` allocates an exception object with the `gc_alloc_exn`
-    // builtin and passes it to `throw_ref`, which roots it in the store
-    // and unwinds.
+    // A `throw` allocates an uninitialized exception object with the
+    // existing `gc_alloc_raw` builtin (the same one Cranelift's inline
+    // allocation falls back to), initializes its tag and payload fields
+    // inline, and passes it to `throw_ref`, which roots it in the store
+    // and unwinds. No bounds checks are needed on the field stores: the
+    // reference came straight from the allocator, so it is trusted and
+    // nothing is read back out of the (untrusted) GC heap.
     fn visit_throw(&mut self, tag_index: u32) -> Self::Output {
         let tag_index = TagIndex::from_u32(tag_index);
         let params = self.env.tag_params(tag_index)?;
-        let slots = params.len() as u32;
+        let slots = params.len();
 
-        const SLOT_SIZE: u32 = 16;
-        self.masm.reserve_stack(slots * SLOT_SIZE)?;
-        let buffer_base = self.masm.sp_offset()?;
-        for i in (0..slots).rev() {
-            let val = self.context.pop_to_reg(self.masm, None)?;
-            let ty: OperandSize = params[i as usize].try_into()?;
-            let addr = self
-                .masm
-                .address_from_sp(SPOffset::from_u32(buffer_base.as_u32() - (i * SLOT_SIZE)))?;
-            self.masm.store(val.reg.into(), addr, ty)?;
-            self.context.free_reg(val);
-        }
+        // The layout of the exception object is collector-specific.
+        // Winch refuses the DRC collector with GC types at config time,
+        // and exceptions require GC types.
+        let layouts: &dyn GcTypeLayouts = match self.tunables.collector {
+            Some(Collector::Null) => &NullTypeLayouts,
+            Some(Collector::Copying) => &CopyingTypeLayouts,
+            _ => return Err(format_err!(CodeGenError::unsupported_wasm_type())),
+        };
+        let interned = self.env.translation.module.tags[tag_index]
+            .exception
+            .unwrap_module_type_index();
+        let exn_ty = match &self.env.types[interned].composite_type.inner {
+            WasmCompositeInnerType::Exn(e) => e,
+            _ => return Err(format_err!(CodeGenError::unsupported_wasm_type())),
+        };
+        let layout = layouts
+            .exn_layout(exn_ty)
+            .map_err(|_| format_err!(CodeGenError::unsupported_wasm_type()))?;
+        let field_offsets: Vec<u32> = layout.fields.iter().map(|f| f.offset).collect();
+        let reserved_bits = match self.tunables.collector {
+            Some(Collector::Copying) => InlineTraceInfo::r#struct(&layout).encode(),
+            _ => 0,
+        };
 
-        let buffer_ptr = self.context.any_gpr(self.masm)?;
-        let addr = self.masm.address_from_sp(buffer_base)?;
-        self.masm
-            .compute_addr(addr, writable!(buffer_ptr), self.env.ptr_type().try_into()?)?;
-        let tag_reg = self.context.any_gpr(self.masm)?;
-        self.masm.mov(
-            writable!(tag_reg),
-            RegImm::i32(tag_index.as_u32() as i32),
+        // Resolve the tag to its (defining instance id, defined tag
+        // index) pair, which the exception object stores. For our own
+        // tags the instance id comes from `get_instance_id` on our
+        // vmctx; for imported tags, on the exporting instance's vmctx.
+        let builtin = self.env.builtins.get_instance_id::<M::ABI>()?;
+        let callee = if self
+            .env
+            .translation
+            .module
+            .defined_tag_index(tag_index)
+            .is_some()
+        {
+            Callee::Builtin(builtin)
+        } else {
+            Callee::BuiltinWithDifferentVmctx(
+                builtin,
+                self.env.vmoffsets.vmctx_vmtag_import_vmctx(tag_index),
+            )
+        };
+        FnCall::emit::<M>(&mut self.env, self.masm, &mut self.context, callee)?;
+
+        // Allocate the uninitialized exception object.
+        let kind = VMGcKind::ExnRef.as_u32() | reserved_bits;
+        let shared_ty = self.context.any_gpr(self.masm)?;
+        let interned_offset = interned
+            .as_u32()
+            .checked_mul(u32::from(self.env.vmoffsets.size_of_vmshared_type_index()))
+            .unwrap();
+        let type_ids = self
+            .masm
+            .address_at_vmctx(self.env.vmoffsets.ptr.vmctx_type_ids_array().into())?;
+        self.masm.load_ptr(type_ids, writable!(shared_ty))?;
+        self.masm.load(
+            self.masm.address_at_reg(shared_ty, interned_offset)?,
+            writable!(shared_ty),
             OperandSize::S32,
         )?;
-        self.context.stack.push(TypedReg::i32(tag_reg).into());
-        self.context
-            .stack
-            .push(TypedReg::new(self.env.ptr_type(), buffer_ptr).into());
-        let builtin = self.env.builtins.gc_alloc_exn::<M::ABI>()?;
+        self.context.stack.push(Val::i32(kind as i32));
+        self.context.stack.push(TypedReg::i32(shared_ty).into());
+        self.context.stack.push(Val::i32(layout.size as i32));
+        self.context.stack.push(Val::i32(layout.align as i32));
+        let builtin = self.env.builtins.gc_alloc_raw::<M::ABI>()?;
         FnCall::emit::<M>(
             &mut self.env,
             self.masm,
@@ -1904,6 +1948,69 @@ where
             Callee::Builtin(builtin),
         )?;
 
+        // The value stack is now [...payloads, instance_id, exnref].
+        // Compute the object's address: gc_heap.base + exnref.
+        let exnref = self.context.pop_to_reg(self.masm, None)?;
+        let obj = self.context.any_gpr(self.masm)?;
+        let sc = u32::from(self.env.vmoffsets.ptr.vmctx_store_context());
+        let hb = u32::from(self.env.vmoffsets.ptr.vm_store_context().gc_heap_base());
+        self.masm
+            .load_ptr(self.masm.address_at_vmctx(sc)?, writable!(obj))?;
+        self.masm
+            .load_ptr(self.masm.address_at_reg(obj, hb)?, writable!(obj))?;
+        self.masm
+            .add(writable!(obj), obj, exnref.reg.into(), OperandSize::S64)?;
+
+        // Tag words.
+        let inst = self.context.pop_to_reg(self.masm, None)?;
+        self.masm.store(
+            inst.reg.into(),
+            self.masm
+                .address_at_reg(obj, layouts.exception_tag_instance_offset())?,
+            OperandSize::S32,
+        )?;
+        let defined_addr = self
+            .masm
+            .address_at_reg(obj, layouts.exception_tag_defined_offset())?;
+        match self.env.translation.module.defined_tag_index(tag_index) {
+            Some(defined) => {
+                self.masm.mov(
+                    writable!(inst.reg),
+                    RegImm::i32(defined.as_u32() as i32),
+                    OperandSize::S32,
+                )?;
+            }
+            None => {
+                self.masm.load(
+                    self.masm
+                        .address_at_vmctx(self.env.vmoffsets.vmctx_vmtag_import_index(tag_index))?,
+                    writable!(inst.reg),
+                    OperandSize::S32,
+                )?;
+            }
+        }
+        self.masm
+            .store(inst.reg.into(), defined_addr, OperandSize::S32)?;
+        self.context.free_reg(inst);
+
+        // Payload fields, in reverse declaration order off the value
+        // stack. Reference payloads are `VMGcRef`s: 32-bit fields.
+        for i in (0..slots).rev() {
+            let val = self.context.pop_to_reg(self.masm, None)?;
+            let size: OperandSize = match &params[i] {
+                WasmValType::Ref(_) => OperandSize::S32,
+                ty => (*ty).try_into()?,
+            };
+            self.masm.store(
+                val.reg.into(),
+                self.masm.address_at_reg(obj, field_offsets[i])?,
+                size,
+            )?;
+            self.context.free_reg(val);
+        }
+        self.context.free_reg(obj);
+
+        self.context.stack.push(exnref.into());
         let builtin = self.env.builtins.throw_ref::<M::ABI>()?;
         FnCall::emit::<M>(
             &mut self.env,
@@ -1912,7 +2019,6 @@ where
             Callee::Builtin(builtin),
         )?;
 
-        self.masm.free_stack(slots * SLOT_SIZE)?;
         self.context.reachable = false;
         let outermost = &mut self.control_frames[0];
         outermost.set_as_target();
@@ -1920,10 +2026,17 @@ where
         Ok(())
     }
 
-    // A rethrown exception is compiled as an unhandled-tag trap; see
-    // `visit_try_table`.
+    // A `throw_ref` rethrows the exception object on top of the value
+    // stack via the `throw_ref` builtin, which traps on null and
+    // otherwise roots the exception in the store and unwinds.
     fn visit_throw_ref(&mut self) -> Self::Output {
-        self.masm.trap(TRAP_UNHANDLED_TAG)?;
+        let builtin = self.env.builtins.throw_ref::<M::ABI>()?;
+        FnCall::emit::<M>(
+            &mut self.env,
+            self.masm,
+            &mut self.context,
+            Callee::Builtin(builtin),
+        )?;
         self.context.reachable = false;
         let outermost = &mut self.control_frames[0];
         outermost.set_as_target();
@@ -2209,7 +2322,12 @@ where
 
     fn visit_ref_null(&mut self, hty: HeapType) -> Self::Output {
         match hty {
-            HeapType::FUNC | HeapType::EXTERN => {
+            HeapType::FUNC
+            | HeapType::EXTERN
+            | HeapType::Abstract {
+                shared: false,
+                ty: wasmparser::AbstractHeapType::Exn,
+            } => {
                 let ptr_type = self.env.ptr_type();
                 match ptr_type {
                     WasmValType::I64 => self.context.stack.push(Val::i64(0)),

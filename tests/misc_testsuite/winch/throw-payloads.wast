@@ -71,3 +71,17 @@
 (assert_exception (invoke "throw-mixed"))
 (assert_exception (invoke "throw-many"))
 (assert_exception (invoke "throw-vec"))
+
+;; A reference payload: the ref is live across the exception allocation.
+(module
+  (tag $eref (param externref))
+  (func (export "throw-ref") (param externref)
+    (throw $eref (local.get 0))))
+
+(assert_exception (invoke "throw-ref" (ref.extern 5)))
+
+;; Rethrowing a null exception reference traps.
+(module
+  (func (export "throw-ref-null") (throw_ref (ref.null exn))))
+
+(assert_trap (invoke "throw-ref-null") "null reference")

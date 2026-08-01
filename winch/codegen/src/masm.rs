@@ -1476,7 +1476,7 @@ pub(crate) trait MacroAssembler {
             WasmValType::I32
             | WasmValType::I64
             | WasmValType::Ref(WasmRefType {
-                heap_type: WasmHeapType::Func | WasmHeapType::Extern,
+                heap_type: WasmHeapType::Func | WasmHeapType::Extern | WasmHeapType::Exn,
                 ..
             }) => self.with_scratch::<IntScratch, _>(f),
             WasmValType::F32 | WasmValType::F64 | WasmValType::V128 => {
