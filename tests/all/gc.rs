@@ -3897,3 +3897,155 @@ fn winch_ref_params_and_results_across_gc() -> Result<()> {
     }
     Ok(())
 }
+
+/// A seeded property soak for Winch's GC reference support: random modules
+/// over the PR-A surface (externref params, locals, globals, refs held
+/// across multi-frame call chains), with a host allocator that forces a
+/// collection on every allocation (zeal), run under both barrier-free
+/// collectors and differentially compared against Cranelift. Set
+/// `WINCH_GC_SOAK_ITERS` to scale up.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn winch_gc_soak() -> Result<()> {
+    use std::fmt::Write as _;
+
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            // xorshift64*
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545F4914F6CDD1D)
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    // Generate a random module: a chain of functions, each taking and
+    // returning an externref, threading references through locals and
+    // globals while deeper frames allocate (and force collections).
+    fn gen_module(rng: &mut Rng) -> String {
+        let nfuncs = 2 + rng.below(4) as usize; // 2..=5
+        let nglobals = 1 + rng.below(3) as usize; // 1..=3
+        let mut m = String::new();
+        m.push_str("(module\n");
+        m.push_str("  (import \"host\" \"mk\" (func $mk (result externref)))\n");
+        for g in 0..nglobals {
+            let _ = writeln!(m, "  (global $g{g} (mut externref) (ref.null extern))");
+        }
+        // Function i calls function i+1 (the last one only allocates), so a
+        // forced collection in the deepest frame walks every caller's map.
+        for f in 0..nfuncs {
+            let _ = writeln!(
+                m,
+                "  (func $f{f} (param externref) (result externref) (local externref)"
+            );
+            let nops = 2 + rng.below(5);
+            for _ in 0..nops {
+                match rng.below(6) {
+                    0 => {
+                        let _ = writeln!(m, "    (local.set 1 (call $mk))");
+                    }
+                    1 => {
+                        let g = rng.below(nglobals as u64);
+                        let _ = writeln!(m, "    (global.set $g{g} (local.get 0))");
+                    }
+                    2 => {
+                        let g = rng.below(nglobals as u64);
+                        let _ = writeln!(m, "    (global.set $g{g} (call $mk))");
+                    }
+                    3 => {
+                        let _ = writeln!(m, "    (local.set 0 (call $mk))");
+                    }
+                    4 if f + 1 < nfuncs => {
+                        let next = f + 1;
+                        let _ = writeln!(m, "    (local.set 1 (call $f{next} (local.get 0)))");
+                    }
+                    _ => {
+                        let g = rng.below(nglobals as u64);
+                        let _ = writeln!(m, "    (local.set 1 (global.get $g{g}))");
+                    }
+                }
+            }
+            // Return one of the refs this frame has been holding; it was
+            // live across every allocation and call above.
+            let ret = match rng.below(3) {
+                0 => "local.get 0".to_string(),
+                1 => "local.get 1".to_string(),
+                _ => format!("global.get $g{}", rng.below(nglobals as u64)),
+            };
+            let _ = writeln!(m, "    ({ret}))");
+        }
+        m.push_str("  (func (export \"run\") (result externref) (call $f0 (call $mk)))\n");
+        m.push_str(")\n");
+        m
+    }
+
+    fn run_engine(strategy: Strategy, collector: Collector, wat: &str) -> Result<Option<u32>> {
+        let mut config = Config::new();
+        config.strategy(strategy);
+        config.collector(collector);
+        config.wasm_reference_types(true);
+        let Ok(engine) = Engine::new(&config) else {
+            return Ok(None);
+        };
+        let module = Module::new(&engine, wat)?;
+        let mut store = Store::new(&engine, 0u32);
+        // Zeal: every allocation forces a full collection, so every frame
+        // holding a reference across `mk` gets its stack map walked.
+        let mk = Func::wrap(
+            &mut store,
+            |mut cx: Caller<'_, u32>| -> Result<Option<Rooted<ExternRef>>> {
+                let id = *cx.data();
+                *cx.data_mut() += 1;
+                let r = ExternRef::new(&mut cx, id)?;
+                cx.gc(None)?;
+                Ok(Some(r))
+            },
+        );
+        let instance = Instance::new(&mut store, &module, &[mk.into()])?;
+        let run = instance.get_typed_func::<(), Option<Rooted<ExternRef>>>(&mut store, "run")?;
+        let out = run.call(&mut store, ())?;
+        let allocated = *store.data();
+        let id = match out {
+            None => u32::MAX,
+            Some(r) => {
+                let id = r
+                    .data(&store)?
+                    .and_then(|d| d.downcast_ref::<u32>().copied())
+                    .expect("returned externref must carry its allocation id");
+                assert!(id < allocated, "returned id {id} was never allocated");
+                id
+            }
+        };
+        Ok(Some(id))
+    }
+
+    let iters: u64 = std::env::var("WINCH_GC_SOAK_ITERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50);
+    let mut rng = Rng(0x9E3779B97F4A7C15);
+    for i in 0..iters {
+        let wat = gen_module(&mut rng);
+        for collector in [Collector::Null, Collector::Copying] {
+            let Some(winch_id) = run_engine(Strategy::Winch, collector, &wat)
+                .map_err(|e| e.context(format!("winch/{collector:?} iter {i}:\n{wat}")))?
+            else {
+                return Ok(()); // winch unavailable on this target
+            };
+            let clif_id = run_engine(Strategy::Cranelift, collector, &wat)
+                .map_err(|e| e.context(format!("cranelift/{collector:?} iter {i}:\n{wat}")))?
+                .unwrap();
+            assert_eq!(
+                winch_id, clif_id,
+                "winch and cranelift diverged under {collector:?} at iter {i}:\n{wat}"
+            );
+        }
+    }
+    Ok(())
+}
