@@ -130,7 +130,8 @@ impl ABI for Aarch64ABI {
     fn sizeof(ty: &WasmValType) -> u8 {
         match ty {
             WasmValType::Ref(rt) => match rt.heap_type {
-                WasmHeapType::Func | WasmHeapType::Extern => Self::word_bytes(),
+                WasmHeapType::Func => Self::word_bytes(),
+                WasmHeapType::Extern => Self::word_bytes() / 2,
                 ht => unimplemented!("Support for WasmHeapType: {ht}"),
             },
             WasmValType::F64 | WasmValType::I64 => Self::word_bytes(),
@@ -159,7 +160,9 @@ impl Aarch64ABI {
             }
 
             ty @ WasmValType::Ref(rt) => match rt.heap_type {
-                WasmHeapType::Func => (index_env.next_gpr().map(regs::xreg), ty),
+                WasmHeapType::Func | WasmHeapType::Extern => {
+                    (index_env.next_gpr().map(regs::xreg), ty)
+                }
                 _ => bail!(CodeGenError::unsupported_wasm_type()),
             },
         };

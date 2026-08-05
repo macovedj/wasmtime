@@ -2450,11 +2450,9 @@ impl Config {
                 }
             }
             Some(Strategy::Winch) => {
-                // EXCEPTIONS and GC_TYPES stay enabled. Winch compiles
-                // `throw` as a trap instead of unwinding, and tag types need
-                // GC_TYPES to be registered even though no GC values are
-                // supported. Anything Winch can't handle fails with a
-                // compile error instead of a panic.
+                // EXCEPTIONS stays enabled. Winch compiles `throw` as a trap
+                // instead of unwinding. Anything Winch can't handle fails
+                // with a compile error instead of a panic.
                 unsupported |= WasmFeatures::GC
                     | WasmFeatures::FUNCTION_REFERENCES
                     | WasmFeatures::RELAXED_SIMD

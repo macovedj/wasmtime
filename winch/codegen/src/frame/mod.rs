@@ -63,10 +63,10 @@ impl DefinedLocals {
             validator.define_locals(position, count, ty)?;
 
             let ty = types.convert_valtype(ty)?;
-            // Only funcref locals are supported for reference types.
             if let WasmValType::Ref(r) = &ty {
-                if r.heap_type != WasmHeapType::Func {
-                    bail!(CodeGenError::unsupported_wasm_type());
+                match r.heap_type {
+                    WasmHeapType::Func | WasmHeapType::Extern => {}
+                    _ => bail!(CodeGenError::unsupported_wasm_type()),
                 }
             }
             for _ in 0..count {

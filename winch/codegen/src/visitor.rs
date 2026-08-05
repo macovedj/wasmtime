@@ -2104,12 +2104,6 @@ where
     fn visit_global_get(&mut self, global_index: u32) -> Self::Output {
         let index = GlobalIndex::from_u32(global_index);
         let (ty, base, offset) = self.emit_get_global_addr(index)?;
-        // Only funcref globals are supported for reference types.
-        if let WasmValType::Ref(r) = &ty {
-            if r.heap_type != WasmHeapType::Func {
-                bail!(CodeGenError::unsupported_wasm_type());
-            }
-        }
         let addr = self.masm.address_at_reg(base, offset)?;
         let gc_ref = self.context.reg_for_type(ty, self.masm)?;
         if self.gc_barrier_needed(&ty) {
