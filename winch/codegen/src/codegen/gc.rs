@@ -1,17 +1,159 @@
 use super::{CodeGen, Emission};
 use crate::{
     Result,
+    codegen::{Callee, FnCall},
     masm::{IntCmpKind, IntScratch, MacroAssembler, OperandSize, RegImm},
     reg::{Reg, writable},
+    stack::TypedReg,
 };
 use cranelift_codegen::MachLabel;
-use wasmtime_cranelift::TRAP_GC_HEAP_CORRUPT;
-use wasmtime_environ::{I31_DISCRIMINANT, PtrSize};
+use wasmtime_cranelift::{TRAP_ALLOCATION_TOO_LARGE, TRAP_GC_HEAP_CORRUPT};
+use wasmtime_environ::{
+    I31_DISCRIMINANT, ModuleInternedTypeIndex, PtrSize, VM_GC_HEADER_KIND_OFFSET,
+    VM_GC_HEADER_TYPE_INDEX_OFFSET,
+};
 
 impl<'a, 'translation, 'data, M> CodeGen<'a, 'translation, 'data, M, Emission>
 where
     M: MacroAssembler,
 {
+    /// Allocates an uninitialized object with the null collector's bump pointer.
+    pub(crate) fn emit_null_gc_alloc(
+        &mut self,
+        kind: u32,
+        interned: ModuleInternedTypeIndex,
+        size: u32,
+        align: u32,
+    ) -> Result<(TypedReg, Reg)> {
+        let heap_data_offset = self.env.vmoffsets.ptr.vmctx().gc_heap_data();
+        let bump = self.context.any_gpr(self.masm)?;
+        self.masm.with_scratch::<IntScratch, _>(|masm, heap_data| {
+            masm.load_ptr(
+                masm.address_at_vmctx(u32::from(heap_data_offset))?,
+                heap_data.writable(),
+            )?;
+            masm.load(
+                masm.address_at_reg(heap_data.inner(), 0)?,
+                writable!(bump),
+                OperandSize::S32,
+            )
+        })?;
+
+        let align_minus_one = align - 1;
+        self.masm.checked_uadd(
+            writable!(bump),
+            bump,
+            RegImm::i32(align_minus_one.cast_signed()),
+            OperandSize::S32,
+            TRAP_ALLOCATION_TOO_LARGE,
+        )?;
+
+        self.masm.and(
+            writable!(bump),
+            bump,
+            RegImm::i32(!align_minus_one.cast_signed()),
+            OperandSize::S32,
+        )?;
+
+        let end = self.context.any_gpr(self.masm)?;
+        self.masm
+            .mov(writable!(end), bump.into(), OperandSize::S32)?;
+        self.masm.checked_uadd(
+            writable!(end),
+            end,
+            RegImm::i32(size.cast_signed()),
+            OperandSize::S32,
+            TRAP_ALLOCATION_TOO_LARGE,
+        )?;
+
+        self.context.stack.push(TypedReg::i32(bump).into());
+        self.context.stack.push(TypedReg::i32(end).into());
+        self.context.spill(self.masm)?;
+        let end = self.context.pop_to_reg(self.masm, None)?;
+        let (heap_reg, heap_bound) = self.emit_load_gc_heap_base_and_bound()?;
+        self.context.free_reg(heap_reg);
+        let in_bounds = self.masm.get_label()?;
+        self.masm.branch(
+            IntCmpKind::LeU,
+            end.reg,
+            heap_bound.into(),
+            in_bounds,
+            OperandSize::S64,
+        )?;
+        self.masm.sub(
+            writable!(end.reg),
+            end.reg,
+            heap_bound.into(),
+            OperandSize::S64,
+        )?;
+        self.context.free_reg(heap_bound);
+        self.context.stack.push(TypedReg::i64(end.reg).into());
+        let grow_gc_heap = self.env.builtins.grow_gc_heap::<M::ABI>()?;
+        FnCall::emit::<M>(
+            &mut self.env,
+            self.masm,
+            &mut self.context,
+            Callee::Builtin(grow_gc_heap),
+        )?;
+        self.context.pop_and_free(self.masm)?;
+
+        self.masm.bind(in_bounds)?;
+        let aligned = self.context.pop_to_reg(self.masm, None)?;
+        let (heap_reg, heap_bound) = self.emit_load_gc_heap_base_and_bound()?;
+        self.context.free_reg(heap_bound);
+        let object_addr = self.emit_gc_ref_addr(aligned.reg, heap_reg)?;
+        self.context.free_reg(heap_reg);
+        let kind_and_size = kind | size;
+        self.masm.store(
+            RegImm::i32(kind_and_size.cast_signed()),
+            self.masm
+                .address_at_reg(object_addr, VM_GC_HEADER_KIND_OFFSET)?,
+            OperandSize::S32,
+        )?;
+        let shared_ty_size = self.env.vmoffsets.size_of_vmshared_type_index();
+        let shared_ty_offset = interned
+            .as_u32()
+            .checked_mul(u32::from(shared_ty_size))
+            .unwrap();
+        let type_ids_offset = self.env.vmoffsets.ptr.vmctx().type_ids();
+        self.masm.with_scratch::<IntScratch, _>(|masm, shared_ty| {
+            masm.load_ptr(
+                masm.address_at_vmctx(type_ids_offset.into())?,
+                shared_ty.writable(),
+            )?;
+            masm.load(
+                masm.address_at_reg(shared_ty.inner(), shared_ty_offset)?,
+                shared_ty.writable(),
+                OperandSize::from_bytes(shared_ty_size),
+            )?;
+            masm.store(
+                shared_ty.inner().into(),
+                masm.address_at_reg(object_addr, VM_GC_HEADER_TYPE_INDEX_OFFSET)?,
+                OperandSize::from_bytes(shared_ty_size),
+            )
+        })?;
+        let heap_data = self.context.any_gpr(self.masm)?;
+        self.masm.load_ptr(
+            self.masm.address_at_vmctx(u32::from(heap_data_offset))?,
+            writable!(heap_data),
+        )?;
+        self.masm.with_scratch::<IntScratch, _>(|masm, end| {
+            masm.mov(end.writable(), aligned.reg.into(), OperandSize::S32)?;
+            masm.add(
+                end.writable(),
+                end.inner(),
+                RegImm::i32(size.cast_signed()),
+                OperandSize::S32,
+            )?;
+            masm.store(
+                end.inner().into(),
+                masm.address_at_reg(heap_data, 0)?,
+                OperandSize::S32,
+            )
+        })?;
+        self.context.free_reg(heap_data);
+        Ok((aligned, object_addr))
+    }
     /// Branches to `skip` when `gc_ref` is null or an unboxed i31 reference.
     ///
     /// A `VMGcRef` is null when all its bits are zero. The first branch tests
@@ -57,7 +199,8 @@ where
     ///
     /// Both returned registers are allocated from the code-generation context
     /// and are owned by the caller. The caller must eventually free them.
-    pub(super) fn emit_load_gc_heap_base_and_bound(&mut self) -> Result<(Reg, Reg)> {
+    pub(crate) fn emit_load_gc_heap_base_and_bound(&mut self) -> Result<(Reg, Reg)> {
+        self.needs_gc_heap = true;
         let store_context_offset = self.env.vmoffsets.ptr.vmctx().store_context();
         let gc_heap_base_offset = self.env.vmoffsets.ptr.vm_store_context().gc_heap_base();
         let gc_heap_len_offset = self
@@ -129,7 +272,7 @@ where
     /// otherwise clobber. Callers that want the address to reuse a register
     /// that is dead by this point should free that register first and let the
     /// allocator hand it back.
-    pub(super) fn emit_gc_ref_addr(&mut self, gc_ref: Reg, heap_base: Reg) -> Result<Reg> {
+    pub(crate) fn emit_gc_ref_addr(&mut self, gc_ref: Reg, heap_base: Reg) -> Result<Reg> {
         let dst = self.context.any_gpr(self.masm)?;
         self.masm
             .mov(writable!(dst), heap_base.into(), OperandSize::S64)?;
