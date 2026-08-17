@@ -26,10 +26,14 @@ use wasmparser::{
     BlockType, BrTable, HeapType, Ieee32, Ieee64, MemArg, TryTable, V128, ValType, VisitOperator,
     VisitSimdOperator,
 };
-use wasmtime_cranelift::{TRAP_INDIRECT_CALL_TO_NULL, TRAP_UNHANDLED_TAG};
+use wasmtime_cranelift::TRAP_INDIRECT_CALL_TO_NULL;
+use wasmtime_environ::copying::{CopyingTypeLayouts, InlineTraceInfo};
+use wasmtime_environ::drc::DrcTypeLayouts;
+use wasmtime_environ::null::NullTypeLayouts;
 use wasmtime_environ::{
-    DataIndex, ElemIndex, FuncIndex, GlobalIndex, MemoryIndex, TableIndex, TypeIndex, WasmHeapType,
-    WasmValType,
+    Collector, DataIndex, ElemIndex, FuncIndex, GcTypeLayouts, GlobalIndex, MemoryIndex, PtrSize,
+    TableIndex, TagIndex, TypeIndex, VMGcKind, WasmCompositeInnerType, WasmHeapType,
+    WasmStorageType, WasmValType,
 };
 
 /// A macro to define unsupported WebAssembly operators.
@@ -1861,10 +1865,212 @@ where
         Ok(())
     }
 
-    // A thrown exception is compiled as an unhandled-tag trap; see
-    // `visit_try_table`.
-    fn visit_throw(&mut self, _tag_index: u32) -> Self::Output {
-        self.masm.trap(TRAP_UNHANDLED_TAG)?;
+    fn visit_throw(&mut self, tag_index: u32) -> Self::Output {
+        let tag_index = TagIndex::from_u32(tag_index);
+        let interned = self.env.translation.module.tags[tag_index]
+            .exception
+            .unwrap_module_type_index();
+        let exn_ty = match &self.env.types[interned].composite_type.inner {
+            WasmCompositeInnerType::Exn(exn_ty) => exn_ty,
+            _ => return Err(format_err!(CodeGenError::unsupported_wasm_type())),
+        };
+        let layouts: &dyn GcTypeLayouts = match self.tunables.collector {
+            Some(Collector::DeferredReferenceCounting) => &DrcTypeLayouts,
+            Some(Collector::Null) => &NullTypeLayouts,
+            Some(Collector::Copying) => &CopyingTypeLayouts,
+            None => return Err(format_err!(CodeGenError::unsupported_wasm_type())),
+        };
+
+        let layout = layouts
+            .exn_layout(exn_ty)
+            .map_err(|_| format_err!(CodeGenError::unsupported_wasm_type()))?;
+        let field_types: SmallVec<[_; 8]> = exn_ty
+            .fields
+            .iter()
+            .map(|field| field.element_type)
+            .collect();
+        let field_offsets: SmallVec<[_; 8]> =
+            layout.fields.iter().map(|field| field.offset).collect();
+
+        // Winch represents `funcref` as a pointer on the value stack and as an
+        // interned ID in the GC heap. Other supported references already use
+        // the GC heap's representation.
+        if field_types.iter().any(|field| {
+            matches!(field, WasmStorageType::Val(WasmValType::Ref(r)) if !matches!(r.heap_type, WasmHeapType::Func | WasmHeapType::Extern))
+        }) {
+            return Err(format_err!(CodeGenError::unsupported_wasm_type()));
+        }
+
+        let reserved_bits = match self.tunables.collector {
+            Some(Collector::Copying) => InlineTraceInfo::r#struct(&layout).encode(),
+            _ => 0,
+        };
+
+        // Resolve the tag to the ID of its defining instance. Imported tags
+        // use the exporting instance's VMContext.
+        let get_instance_id = self.env.builtins.get_instance_id::<M::ABI>()?;
+        let defined_tag = self.env.translation.module.defined_tag_index(tag_index);
+        let get_instance_id = match defined_tag {
+            Some(_) => Callee::Builtin(get_instance_id),
+            None => {
+                let vmimport = self.env.vmoffsets.imported_tags().at(tag_index);
+                let vmctx_offset =
+                    vmimport + u32::from(self.env.vmoffsets.ptr.vm_tag_import().vmctx());
+                Callee::BuiltinWithDifferentVmctx(get_instance_id, vmctx_offset)
+            }
+        };
+        FnCall::emit::<M>(&mut self.env, self.masm, &mut self.context, get_instance_id)?;
+
+        let kind = VMGcKind::ExnRef.as_u32() | reserved_bits;
+        let (mut gc_ref, mut object_addr) = match self.tunables.collector {
+            Some(Collector::Null) => {
+                self.emit_null_gc_alloc(kind, interned, layout.size, layout.align)?
+            }
+
+            Some(Collector::DeferredReferenceCounting) | Some(Collector::Copying) => {
+                let shared_ty_size = self.env.vmoffsets.size_of_vmshared_type_index();
+                let shared_ty_offset = interned
+                    .as_u32()
+                    .checked_mul(u32::from(shared_ty_size))
+                    .unwrap();
+
+                let shared_ty = self.context.any_gpr(self.masm)?;
+                self.masm.load_ptr(
+                    self.masm
+                        .address_at_vmctx(self.env.vmoffsets.ptr.vmctx().type_ids().into())?,
+                    writable!(shared_ty),
+                )?;
+                self.masm.load(
+                    self.masm.address_at_reg(shared_ty, shared_ty_offset)?,
+                    writable!(shared_ty),
+                    OperandSize::from_bytes(shared_ty_size),
+                )?;
+                self.context.stack.push(Val::i32(kind.cast_signed()));
+                self.context.stack.push(TypedReg::i32(shared_ty).into());
+                self.context.stack.push(Val::i32(layout.size.cast_signed()));
+                self.context
+                    .stack
+                    .push(Val::i32(layout.align.cast_signed()));
+                let gc_alloc_raw = self.env.builtins.gc_alloc_raw::<M::ABI>()?;
+                FnCall::emit::<M>(
+                    &mut self.env,
+                    self.masm,
+                    &mut self.context,
+                    Callee::Builtin(gc_alloc_raw),
+                )?;
+
+                let gc_ref = self.context.pop_to_reg(self.masm, None)?;
+                let (heap_base, heap_bound) = self.emit_load_gc_heap_base_and_bound()?;
+                self.context.free_reg(heap_bound);
+                let object_addr = self.emit_gc_ref_addr(gc_ref.reg, heap_base)?;
+                self.context.free_reg(heap_base);
+                (gc_ref, object_addr)
+            }
+
+            None => return Err(format_err!(CodeGenError::unsupported_wasm_type())),
+        };
+
+        // Store the tag as its defining instance ID and its index within that
+        // instance.
+        let instance_id = self.context.pop_to_reg(self.masm, None)?;
+        self.masm.store(
+            instance_id.reg.into(),
+            self.masm
+                .address_at_reg(object_addr, layouts.exception_tag_instance_offset())?,
+            OperandSize::S32,
+        )?;
+        self.context.free_reg(instance_id.reg);
+
+        let defined_tag_id = self.context.any_gpr(self.masm)?;
+        match defined_tag {
+            Some(defined) => self.masm.mov(
+                writable!(defined_tag_id),
+                RegImm::i32(defined.as_u32().cast_signed()),
+                OperandSize::S32,
+            )?,
+            None => {
+                let vmimport = self.env.vmoffsets.imported_tags().at(tag_index);
+                let index_offset =
+                    vmimport + u32::from(self.env.vmoffsets.ptr.vm_tag_import().index());
+                self.masm.load(
+                    self.masm.address_at_vmctx(index_offset)?,
+                    writable!(defined_tag_id),
+                    OperandSize::S32,
+                )?;
+            }
+        }
+        self.masm.store(
+            defined_tag_id.into(),
+            self.masm
+                .address_at_reg(object_addr, layouts.exception_tag_defined_offset())?,
+            OperandSize::S32,
+        )?;
+        self.context.free_reg(defined_tag_id);
+
+        // Payload operands are on the value stack in declaration order, so
+        // initialize the fields from last to first.
+        for (field_ty, field_offset) in field_types.into_iter().zip(field_offsets).rev() {
+            match field_ty {
+                WasmStorageType::I8 => {
+                    let value = self.context.pop_to_reg(self.masm, None)?;
+                    let addr = self.masm.address_at_reg(object_addr, field_offset)?;
+                    self.masm.store(value.reg.into(), addr, OperandSize::S8)?;
+                    self.context.free_reg(value.reg);
+                }
+                WasmStorageType::I16 => {
+                    let value = self.context.pop_to_reg(self.masm, None)?;
+                    let addr = self.masm.address_at_reg(object_addr, field_offset)?;
+                    self.masm.store(value.reg.into(), addr, OperandSize::S16)?;
+                    self.context.free_reg(value.reg);
+                }
+                WasmStorageType::Val(WasmValType::Ref(r)) if r.heap_type == WasmHeapType::Func => {
+                    let func_ref = self.context.pop_to_reg(self.masm, None)?;
+
+                    // The call below can clobber registers, so preserve the
+                    // allocation results beneath its argument.
+                    self.context.stack.push(TypedReg::i64(object_addr).into());
+                    self.context.stack.push(gc_ref.into());
+                    self.context.stack.push(func_ref.into());
+
+                    let intern = self.env.builtins.intern_func_ref_for_gc_heap::<M::ABI>()?;
+                    FnCall::emit::<M>(
+                        &mut self.env,
+                        self.masm,
+                        &mut self.context,
+                        Callee::Builtin(intern),
+                    )?;
+
+                    let func_ref_id = self.context.pop_to_reg(self.masm, None)?;
+                    gc_ref = self.context.pop_to_reg(self.masm, None)?;
+                    object_addr = self.context.pop_to_reg(self.masm, None)?.reg;
+                    let addr = self.masm.address_at_reg(object_addr, field_offset)?;
+                    self.masm
+                        .store(func_ref_id.reg.into(), addr, OperandSize::S32)?;
+                    self.context.free_reg(func_ref_id.reg);
+                }
+                WasmStorageType::Val(ty @ WasmValType::Ref(_))
+                    if self.tunables.collector == Some(Collector::DeferredReferenceCounting) =>
+                {
+                    let addr = self.masm.address_at_reg(object_addr, field_offset)?;
+                    self.emit_drc_init_barrier(ty, addr)?;
+                }
+                WasmStorageType::Val(_) => {
+                    let addr = self.masm.address_at_reg(object_addr, field_offset)?;
+                    self.context.pop_to_addr(self.masm, addr)?;
+                }
+            }
+        }
+        self.context.free_reg(object_addr);
+
+        self.context.stack.push(gc_ref.into());
+        let throw_ref = self.env.builtins.throw_ref::<M::ABI>()?;
+        FnCall::emit::<M>(
+            &mut self.env,
+            self.masm,
+            &mut self.context,
+            Callee::Builtin(throw_ref),
+        )?;
+
         self.context.reachable = false;
         let outermost = &mut self.control_frames[0];
         outermost.set_as_target();
@@ -1872,14 +2078,17 @@ where
         Ok(())
     }
 
-    // A rethrown exception is compiled as an unhandled-tag trap; see
-    // `visit_try_table`.
     fn visit_throw_ref(&mut self) -> Self::Output {
-        self.masm.trap(TRAP_UNHANDLED_TAG)?;
+        let throw_ref = self.env.builtins.throw_ref::<M::ABI>()?;
+        FnCall::emit::<M>(
+            &mut self.env,
+            self.masm,
+            &mut self.context,
+            Callee::Builtin(throw_ref),
+        )?;
         self.context.reachable = false;
         let outermost = &mut self.control_frames[0];
         outermost.set_as_target();
-
         Ok(())
     }
 

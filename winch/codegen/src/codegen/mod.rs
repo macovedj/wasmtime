@@ -120,6 +120,9 @@ where
 
     /// Local counter to track fuel consumption.
     pub fuel_consumed: i64,
+
+    /// Whether this function accesses the store's GC heap.
+    pub needs_gc_heap: bool,
     phase: PhantomData<P>,
 }
 
@@ -144,6 +147,7 @@ where
             control_frames: Default::default(),
             // Empty functions should consume at least 1 fuel unit.
             fuel_consumed: 1,
+            needs_gc_heap: false,
             phase: PhantomData,
         }
     }
@@ -205,6 +209,7 @@ where
             source_location: self.source_location,
             control_frames: self.control_frames,
             fuel_consumed: self.fuel_consumed,
+            needs_gc_heap: self.needs_gc_heap,
             phase: PhantomData,
         })
     }
