@@ -190,6 +190,7 @@ macro_rules! def_unsupported {
     (emit LocalGet $($rest:tt)*) => {};
     (emit LocalSet $($rest:tt)*) => {};
     (emit Call $($rest:tt)*) => {};
+    (emit ReturnCall $($rest:tt)*) => {};
     (emit End $($rest:tt)*) => {};
     (emit Nop $($rest:tt)*) => {};
     (emit If $($rest:tt)*) => {};
@@ -1685,6 +1686,19 @@ where
     fn visit_call(&mut self, index: u32) -> Self::Output {
         let callee = self.env.callee_from_index(FuncIndex::from_u32(index));
         FnCall::emit::<M>(&mut self.env, self.masm, &mut self.context, callee)?;
+        Ok(())
+    }
+
+    fn visit_return_call(&mut self, index: u32) -> Self::Output {
+        let callee = self.env.callee_from_index(FuncIndex::from_u32(index));
+        FnCall::emit_return::<M>(
+            &mut self.env,
+            self.masm,
+            &mut self.context,
+            self.sig.params_stack_size(),
+            callee,
+        )?;
+        self.context.reachable = false;
         Ok(())
     }
 

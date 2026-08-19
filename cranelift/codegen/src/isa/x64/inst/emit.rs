@@ -435,6 +435,8 @@ pub(crate) fn emit(
                 sink.add_call_site();
             }
 
+            restore_winch_call_stack_pointer(sink, info, state, &call_info);
+
             // Reclaim the outgoing argument area that was released by the
             // callee, to ensure that StackAMode values are always computed from
             // a consistent SP.
@@ -516,6 +518,8 @@ pub(crate) fn emit(
             } else {
                 sink.add_call_site();
             }
+
+            restore_winch_call_stack_pointer(sink, info, state, &call_info);
 
             // Reclaim the outgoing argument area that was released by the callee, to ensure that
             // StackAMode values are always computed from a consistent SP.
@@ -1852,6 +1856,32 @@ pub(crate) fn emit(
     }
 
     state.clear_post_insn();
+}
+
+/// Restore the stack pointer after a call into Winch-compiled code.
+///
+/// Winch tail calls preserve their caller-clean ABI by allowing the final
+/// callee to return with a differently-sized argument area. Recovering SP from
+/// FP makes the Cranelift-generated trampoline independent of that size.
+fn restore_winch_call_stack_pointer<T>(
+    sink: &mut MachBuffer<Inst>,
+    info: &EmitInfo,
+    state: &mut EmitState,
+    call_info: &CallInfo<T>,
+) {
+    if call_info.callee_conv != CallConv::Winch {
+        return;
+    }
+
+    assert!(
+        info.flags.preserve_frame_pointers(),
+        "calls into Winch code require a frame pointer to recover SP after a tail call"
+    );
+    let fp_to_sp = i32::try_from(state.frame_layout().sp_to_fp())
+        .expect("frame size is too large to fit in a 32-bit immediate");
+    let rsp = Writable::from_reg(regs::rsp()).map(Gpr::unwrap_new);
+    let addr = Amode::imm_reg(-fp_to_sp, regs::rbp());
+    asm::inst::leaq_rm::new(rsp, addr).emit(sink, info, state);
 }
 
 /// Emit the common sequence used for both direct and indirect tail calls:

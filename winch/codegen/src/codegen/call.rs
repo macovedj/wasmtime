@@ -60,7 +60,7 @@
 
 use crate::{
     FuncEnv, Result,
-    abi::{ABIOperand, ABISig, RetArea, vmctx},
+    abi::{ABIOperand, ABISig, RetArea, align_to, vmctx},
     codegen::{BuiltinFunction, BuiltinType, Callee, CodeGenContext, CodeGenError, Emission},
     ensure,
     masm::{
@@ -122,6 +122,46 @@ impl FnCall {
             masm,
             context,
         )
+    }
+
+    /// Emit a tail call which replaces the current frame.
+    ///
+    /// This is an experimental caller-clean implementation. Stack arguments
+    /// are first staged below the current frame, then the macro assembler
+    /// slides the caller's return address and argument block into the callee's
+    /// incoming layout before jumping.
+    pub fn emit_return<M: MacroAssembler>(
+        env: &mut FuncEnv<M::Ptr>,
+        masm: &mut M,
+        context: &mut CodeGenContext<Emission>,
+        caller_stack_args_size: u32,
+        callee: Callee,
+    ) -> Result<()> {
+        let (kind, callee_context) = Self::lower(env, context.vmoffsets, &callee, context, masm)?;
+        let sig = env.callee_sig::<M::ABI>(&callee)?;
+
+        // Passing the inherited multi-value return area is deliberately left
+        // for the next prototype step. It needs to load the current function's
+        // saved return-area pointer rather than allocate a new area as a normal
+        // call does.
+        ensure!(
+            !sig.has_stack_results(),
+            CodeGenError::unimplemented_wasm_instruction()
+        );
+
+        context.spill(masm)?;
+
+        let alignment = u32::from(<M::ABI as crate::abi::ABI>::call_stack_align());
+        let caller_stack_args_size = align_to(caller_stack_args_size, alignment);
+        let callee_stack_args_size = align_to(sig.params_stack_size(), alignment);
+
+        // Stage the outgoing stack arguments in a non-overlapping area first.
+        // The frame-replacement sequence reserves two additional pointer slots
+        // below this area for the original return address and frame pointer.
+        masm.reserve_stack(callee_stack_args_size)?;
+        Self::assign(sig, &callee_context, None, context, masm)?;
+        masm.reserve_stack(u32::from(<M::ABI as crate::abi::ABI>::word_bytes()) * 2)?;
+        masm.tail_call(caller_stack_args_size, callee_stack_args_size, kind)
     }
 
     /// Calculates the return area for the callee, if any.
@@ -402,7 +442,7 @@ impl FnCall {
         }
         // Deallocate the reserved space for stack arguments and for alignment,
         // which was allocated last.
-        masm.free_stack(reserved_space)?;
+        masm.restore_stack_after_call(reserved_space)?;
 
         ensure!(
             sig.params.len_without_retptr() >= callee_context.len(),

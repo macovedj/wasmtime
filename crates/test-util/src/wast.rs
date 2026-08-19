@@ -455,7 +455,6 @@ impl Compiler {
 
             Compiler::Winch => {
                 if config.gc()
-                    || config.tail_call()
                     || config.function_references()
                     || config.relaxed_simd()
                     || config.legacy_exceptions()
@@ -465,7 +464,7 @@ impl Compiler {
                 }
 
                 if cfg!(target_arch = "aarch64") {
-                    return config.threads();
+                    return config.threads() || config.tail_call();
                 }
 
                 !cfg!(target_arch = "x86_64")
