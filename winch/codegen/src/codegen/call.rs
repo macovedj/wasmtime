@@ -139,15 +139,15 @@ impl FnCall {
     ) -> Result<()> {
         let (kind, callee_context) = Self::lower(env, context.vmoffsets, &callee, context, masm)?;
         let sig = env.callee_sig::<M::ABI>(&callee)?;
-
-        // Passing the inherited multi-value return area is deliberately left
-        // for the next prototype step. It needs to load the current function's
-        // saved return-area pointer rather than allocate a new area as a normal
-        // call does.
-        ensure!(
-            !sig.has_stack_results(),
-            CodeGenError::unimplemented_wasm_instruction()
-        );
+        let ret_area = if sig.has_stack_results() {
+            let slot = context
+                .frame
+                .results_base_slot
+                .ok_or_else(CodeGenError::results_area_expected)?;
+            Some(RetArea::slot(slot))
+        } else {
+            None
+        };
 
         context.spill(masm)?;
 
@@ -159,7 +159,7 @@ impl FnCall {
         // The frame-replacement sequence reserves two additional pointer slots
         // below this area for the original return address and frame pointer.
         masm.reserve_stack(callee_stack_args_size)?;
-        Self::assign(sig, &callee_context, None, context, masm)?;
+        Self::assign(sig, &callee_context, ret_area.as_ref(), context, masm)?;
         masm.reserve_stack(u32::from(<M::ABI as crate::abi::ABI>::word_bytes()) * 2)?;
         masm.tail_call(caller_stack_args_size, callee_stack_args_size, kind)
     }
@@ -395,22 +395,40 @@ impl FnCall {
 
         if sig.has_stack_results() {
             let operand = sig.params.unwrap_results_area_operand();
-            let base = ret_area.unwrap().unwrap_sp();
-            let addr = masm.address_from_sp(base)?;
-
-            match operand {
-                &ABIOperand::Reg { ty, reg, .. } => {
-                    masm.compute_addr(addr, writable!(reg), ty.try_into()?)?;
+            match ret_area.unwrap() {
+                RetArea::SP(base) => {
+                    let addr = masm.address_from_sp(*base)?;
+                    match operand {
+                        &ABIOperand::Reg { ty, reg, .. } => {
+                            masm.compute_addr(addr, writable!(reg), ty.try_into()?)?;
+                        }
+                        &ABIOperand::Stack { ty, offset, .. } => {
+                            let slot = masm.address_at_sp(SPOffset::from_u32(offset))?;
+                            // Don't rely on `ABI::scratch_for` as we always use
+                            // an int register as the return pointer.
+                            masm.with_scratch::<IntScratch, _>(|masm, scratch| {
+                                masm.compute_addr(addr, scratch.writable(), ty.try_into()?)?;
+                                masm.store(scratch.inner().into(), slot, ty.try_into()?)
+                            })?;
+                        }
+                    }
                 }
-                &ABIOperand::Stack { ty, offset, .. } => {
-                    let slot = masm.address_at_sp(SPOffset::from_u32(offset))?;
-                    // Don't rely on `ABI::scratch_for` as we always use
-                    // an int register as the return pointer.
-                    masm.with_scratch::<IntScratch, _>(|masm, scratch| {
-                        masm.compute_addr(addr, scratch.writable(), ty.try_into()?)?;
-                        masm.store(scratch.inner().into(), slot, ty.try_into()?)
-                    })?;
+                RetArea::Slot(source) => {
+                    let source = masm.local_address(source)?;
+                    match operand {
+                        ABIOperand::Reg { reg, .. } => {
+                            masm.load_ptr(source, writable!(*reg))?;
+                        }
+                        ABIOperand::Stack { offset, .. } => {
+                            let destination = masm.address_at_sp(SPOffset::from_u32(*offset))?;
+                            masm.with_scratch::<IntScratch, _>(|masm, scratch| {
+                                masm.load_ptr(source, scratch.writable())?;
+                                masm.store_ptr(scratch.inner(), destination)
+                            })?;
+                        }
+                    }
                 }
+                RetArea::Uninit => crate::bail!(CodeGenError::results_area_expected()),
             }
         }
         Ok(())
