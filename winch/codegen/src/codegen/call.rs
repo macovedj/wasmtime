@@ -156,11 +156,16 @@ impl FnCall {
         let callee_stack_args_size = align_to(sig.params_stack_size(), alignment);
 
         // Stage the outgoing stack arguments in a non-overlapping area first.
-        // The frame-replacement sequence reserves two additional pointer slots
-        // below this area for the original return address and frame pointer.
         masm.reserve_stack(callee_stack_args_size)?;
         Self::assign(sig, &callee_context, ret_area.as_ref(), context, masm)?;
-        masm.reserve_stack(u32::from(<M::ABI as crate::abi::ABI>::word_bytes()) * 2)?;
+
+        // Resizing to a non-empty argument area can overwrite the saved frame
+        // state while moving arguments. Reserve two pointer slots for the
+        // macro assembler to preserve that state. Equal-sized areas cannot
+        // overwrite it, and a zero-sized callee has no arguments to move.
+        if callee_stack_args_size != 0 && caller_stack_args_size != callee_stack_args_size {
+            masm.reserve_stack(u32::from(<M::ABI as crate::abi::ABI>::word_bytes()) * 2)?;
+        }
         masm.tail_call(caller_stack_args_size, callee_stack_args_size, kind)
     }
 

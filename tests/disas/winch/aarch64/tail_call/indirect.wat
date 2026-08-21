@@ -57,10 +57,10 @@
 ;;       ldur    x16, [x0, #8]
 ;;       ldur    x16, [x16, #0x18]
 ;;       mov     x17, #0
-;;       movk    x17, #0x2c
+;;       movk    x17, #0x24
 ;;       add     x16, x16, x17
 ;;       cmp     sp, x16
-;;       b.lo    #0x1fc
+;;       b.lo    #0x1e0
 ;;   ac: mov     x9, x0
 ;;       sub     x28, x28, #0x18
 ;;       mov     sp, x28
@@ -76,7 +76,7 @@
 ;;       ldur    x3, [x2, #0x38]
 ;;       cmp     x1, x3, uxtx
 ;;       sub     sp, x28, #4
-;;       b.hs    #0x200
+;;       b.hs    #0x1e4
 ;;   ec: mov     sp, x28
 ;;       mov     x16, x1
 ;;       mov     x17, #8
@@ -96,7 +96,7 @@
 ;;       mov     x0, x9
 ;;       mov     x1, #0
 ;;       ldur    w2, [x28]
-;;       bl      #0x4f8
+;;       bl      #0x4dc
 ;;  13c: mov     sp, x28
 ;;       add     x28, x28, #4
 ;;       mov     sp, x28
@@ -104,14 +104,14 @@
 ;;       b       #0x154
 ;;  150: and     x0, x0, #0xfffffffffffffffe
 ;;       sub     sp, x28, #4
-;;       cbz     x0, #0x204
+;;       cbz     x0, #0x1e8
 ;;  15c: mov     sp, x28
 ;;       ldur    x16, [x9, #0x28]
 ;;       ldur    w1, [x16]
 ;;       ldur    w2, [x0, #0x10]
 ;;       cmp     w1, w2, uxtx
 ;;       sub     sp, x28, #4
-;;       b.ne    #0x208
+;;       b.ne    #0x1ec
 ;;  178: mov     sp, x28
 ;;       sub     x28, x28, #8
 ;;       mov     sp, x28
@@ -128,24 +128,17 @@
 ;;       mov     x4, #3
 ;;       mov     x5, #4
 ;;       mov     x6, #5
-;;       sub     x28, x28, #0x10
-;;       mov     sp, x28
-;;       ldur    x16, [x29, #-0x10]
-;;       ldur    x30, [x29, #8]
-;;       ldur    x17, [x29]
-;;       stur    x17, [x28]
-;;       add     x17, x29, #0x10
-;;       ldur    x29, [x28]
-;;       mov     sp, x17
-;;       mov     x28, x16
+;;       ldur    x28, [x29, #-0x10]
+;;       mov     sp, x29
+;;       ldp     x29, x30, [sp], #0x10
 ;;       br      x8
-;;  1e4: add     x28, x28, #0x18
+;;  1c8: add     x28, x28, #0x18
 ;;       mov     sp, x28
 ;;       mov     sp, x28
 ;;       ldr     x28, [sp], #0x10
 ;;       ldp     x29, x30, [sp], #0x10
 ;;       ret
-;;  1fc: udf     #0xc11f
-;;  200: udf     #0xc11f
-;;  204: udf     #0xc11f
-;;  208: udf     #0xc11f
+;;  1e0: udf     #0xc11f
+;;  1e4: udf     #0xc11f
+;;  1e8: udf     #0xc11f
+;;  1ec: udf     #0xc11f

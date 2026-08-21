@@ -1478,12 +1478,13 @@ pub(crate) trait MacroAssembler {
 
     /// Replace the current frame with a callee frame and jump to the callee.
     ///
-    /// The callee's stack arguments have already been staged at the current
-    /// stack pointer, with two pointer-sized scratch slots immediately below
-    /// them. Implementations are responsible for preserving the caller's
-    /// return address, moving the staged arguments into their incoming
+    /// The callee's stack arguments have already been staged below the current
+    /// frame. When a non-empty argument area changes size, two pointer-sized
+    /// scratch slots are reserved immediately below the staged arguments.
+    /// Implementations are responsible for preserving the caller's frame
+    /// state as needed, moving the staged arguments into their incoming
     /// locations, restoring the caller's frame pointer, and jumping without
-    /// pushing a new return address.
+    /// adding a return address.
     fn tail_call(
         &mut self,
         _caller_stack_args_size: u32,
