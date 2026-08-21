@@ -31,7 +31,7 @@
 ;;       movq    0x18(%r11), %r11
 ;;       addq    $0x10, %r11
 ;;       cmpq    %rsp, %r11
-;;       ja      0x88
+;;       ja      0x8c
 ;;   5c: movq    %rdi, %r14
 ;;       subq    $0x10, %rsp
 ;;       movq    %rdi, 8(%rsp)
@@ -39,8 +39,9 @@
 ;;       movq    %r14, %rdi
 ;;       movq    %r14, %rsi
 ;;       callq   0
+;;       leaq    -0x10(%rbp), %rsp
 ;;       movq    8(%rsp), %r14
 ;;       addq    $0x10, %rsp
 ;;       popq    %rbp
 ;;       retq
-;;   88: ud2
+;;   8c: ud2

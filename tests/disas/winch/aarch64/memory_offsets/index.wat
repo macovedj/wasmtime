@@ -553,7 +553,7 @@
 ;;       movk    x17, #0xf10
 ;;       add     x16, x16, x17
 ;;       cmp     sp, x16
-;;       b.lo    #0x8a8
+;;       b.lo    #0x8c8
 ;;   2c: mov     x9, x1
 ;;       sub     x28, x28, #0x18
 ;;       mov     sp, x28
@@ -567,7 +567,7 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #0xc
-;;       bl      #0x8c0
+;;       bl      #0x8e0
 ;;   64: add     x28, x28, #0xc
 ;;       mov     sp, x28
 ;;       ldur    x9, [x28, #0x7c]
@@ -581,7 +581,7 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #8
-;;       bl      #0x8c0
+;;       bl      #0x8e0
 ;;   9c: add     x28, x28, #8
 ;;       mov     sp, x28
 ;;       ldur    x9, [x28, #0xf0]
@@ -595,7 +595,7 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #4
-;;       bl      #0xaa0
+;;       bl      #0xac0
 ;;   d4: add     x28, x28, #4
 ;;       mov     sp, x28
 ;;       mov     x16, #0x164
@@ -608,8 +608,9 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #0
-;;       bl      #0xaa0
-;;  108: ldr     x9, [x28, #0x1d8]
+;;       bl      #0xac0
+;;  108: mov     sp, x28
+;;       ldr     x9, [x28, #0x1d8]
 ;;       sub     x28, x28, #8
 ;;       mov     sp, x28
 ;;       stur    d0, [x28]
@@ -620,8 +621,8 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #0xc
-;;       bl      #0xaa0
-;;  138: add     x28, x28, #0xc
+;;       bl      #0xac0
+;;  13c: add     x28, x28, #0xc
 ;;       mov     sp, x28
 ;;       mov     x16, #0x24c
 ;;       ldr     x9, [x28, x16, sxtx]
@@ -635,8 +636,8 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #8
-;;       bl      #0xaa0
-;;  174: add     x28, x28, #8
+;;       bl      #0xac0
+;;  178: add     x28, x28, #8
 ;;       mov     sp, x28
 ;;       ldr     x9, [x28, #0x2c0]
 ;;       sub     x28, x28, #8
@@ -649,8 +650,8 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #4
-;;       bl      #0xaa0
-;;  1ac: add     x28, x28, #4
+;;       bl      #0xac0
+;;  1b0: add     x28, x28, #4
 ;;       mov     sp, x28
 ;;       mov     x16, #0x334
 ;;       ldr     x9, [x28, x16, sxtx]
@@ -662,8 +663,9 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #0
-;;       bl      #0xaa0
-;;  1e0: ldr     x9, [x28, #0x3a8]
+;;       bl      #0xac0
+;;  1e4: mov     sp, x28
+;;       ldr     x9, [x28, #0x3a8]
 ;;       sub     x28, x28, #8
 ;;       mov     sp, x28
 ;;       stur    d0, [x28]
@@ -674,8 +676,8 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #0xc
-;;       bl      #0xaa0
-;;  210: add     x28, x28, #0xc
+;;       bl      #0xac0
+;;  218: add     x28, x28, #0xc
 ;;       mov     sp, x28
 ;;       mov     x16, #0x41c
 ;;       ldr     x9, [x28, x16, sxtx]
@@ -689,8 +691,8 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #8
-;;       bl      #0xaa0
-;;  24c: add     x28, x28, #8
+;;       bl      #0xac0
+;;  254: add     x28, x28, #8
 ;;       mov     sp, x28
 ;;       ldr     x9, [x28, #0x490]
 ;;       sub     x28, x28, #8
@@ -703,8 +705,8 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #4
-;;       bl      #0xaa0
-;;  284: add     x28, x28, #4
+;;       bl      #0xac0
+;;  28c: add     x28, x28, #4
 ;;       mov     sp, x28
 ;;       mov     x16, #0x504
 ;;       ldr     x9, [x28, x16, sxtx]
@@ -716,8 +718,9 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #0
-;;       bl      #0xaa0
-;;  2b8: ldr     x9, [x28, #0x578]
+;;       bl      #0xac0
+;;  2c0: mov     sp, x28
+;;       ldr     x9, [x28, #0x578]
 ;;       sub     x28, x28, #8
 ;;       mov     sp, x28
 ;;       stur    d0, [x28]
@@ -728,8 +731,8 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #0xc
-;;       bl      #0xaa0
-;;  2e8: add     x28, x28, #0xc
+;;       bl      #0xac0
+;;  2f4: add     x28, x28, #0xc
 ;;       mov     sp, x28
 ;;       mov     x16, #0x5ec
 ;;       ldr     x9, [x28, x16, sxtx]
@@ -743,8 +746,8 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #8
-;;       bl      #0xaa0
-;;  324: add     x28, x28, #8
+;;       bl      #0xac0
+;;  330: add     x28, x28, #8
 ;;       mov     sp, x28
 ;;       ldr     x9, [x28, #0x660]
 ;;       sub     x28, x28, #8
@@ -757,8 +760,8 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #4
-;;       bl      #0xaa0
-;;  35c: add     x28, x28, #4
+;;       bl      #0xac0
+;;  368: add     x28, x28, #4
 ;;       mov     sp, x28
 ;;       mov     x16, #0x6d4
 ;;       ldr     x9, [x28, x16, sxtx]
@@ -770,8 +773,9 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #0
-;;       bl      #0xaa0
-;;  390: ldr     x9, [x28, #0x748]
+;;       bl      #0xac0
+;;  39c: mov     sp, x28
+;;       ldr     x9, [x28, #0x748]
 ;;       sub     x28, x28, #8
 ;;       mov     sp, x28
 ;;       stur    d0, [x28]
@@ -782,8 +786,8 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #0xc
-;;       bl      #0xaa0
-;;  3c0: add     x28, x28, #0xc
+;;       bl      #0xac0
+;;  3d0: add     x28, x28, #0xc
 ;;       mov     sp, x28
 ;;       mov     x16, #0x7bc
 ;;       ldr     x9, [x28, x16, sxtx]
@@ -797,8 +801,8 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #8
-;;       bl      #0xaa0
-;;  3fc: add     x28, x28, #8
+;;       bl      #0xac0
+;;  40c: add     x28, x28, #8
 ;;       mov     sp, x28
 ;;       ldr     x9, [x28, #0x830]
 ;;       sub     x28, x28, #8
@@ -811,8 +815,8 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #4
-;;       bl      #0xaa0
-;;  434: add     x28, x28, #4
+;;       bl      #0xac0
+;;  444: add     x28, x28, #4
 ;;       mov     sp, x28
 ;;       mov     x16, #0x8a4
 ;;       ldr     x9, [x28, x16, sxtx]
@@ -824,8 +828,9 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #0
-;;       bl      #0xaa0
-;;  468: ldr     x9, [x28, #0x918]
+;;       bl      #0xac0
+;;  478: mov     sp, x28
+;;       ldr     x9, [x28, #0x918]
 ;;       sub     x28, x28, #8
 ;;       mov     sp, x28
 ;;       stur    d0, [x28]
@@ -836,8 +841,8 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #0xc
-;;       bl      #0xaa0
-;;  498: add     x28, x28, #0xc
+;;       bl      #0xac0
+;;  4ac: add     x28, x28, #0xc
 ;;       mov     sp, x28
 ;;       mov     x16, #0x98c
 ;;       ldr     x9, [x28, x16, sxtx]
@@ -851,8 +856,8 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #8
-;;       bl      #0xaa0
-;;  4d4: add     x28, x28, #8
+;;       bl      #0xac0
+;;  4e8: add     x28, x28, #8
 ;;       mov     sp, x28
 ;;       ldr     x9, [x28, #0xa00]
 ;;       sub     x28, x28, #8
@@ -865,8 +870,8 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #4
-;;       bl      #0xaa0
-;;  50c: add     x28, x28, #4
+;;       bl      #0xac0
+;;  520: add     x28, x28, #4
 ;;       mov     sp, x28
 ;;       mov     x16, #0xa74
 ;;       ldr     x9, [x28, x16, sxtx]
@@ -878,8 +883,9 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #0
-;;       bl      #0xaa0
-;;  540: ldr     x9, [x28, #0xae8]
+;;       bl      #0xac0
+;;  554: mov     sp, x28
+;;       ldr     x9, [x28, #0xae8]
 ;;       sub     x28, x28, #8
 ;;       mov     sp, x28
 ;;       stur    d0, [x28]
@@ -890,8 +896,8 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #0xc
-;;       bl      #0xaa0
-;;  570: add     x28, x28, #0xc
+;;       bl      #0xac0
+;;  588: add     x28, x28, #0xc
 ;;       mov     sp, x28
 ;;       mov     x16, #0xb5c
 ;;       ldr     x9, [x28, x16, sxtx]
@@ -905,8 +911,8 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #8
-;;       bl      #0xaa0
-;;  5ac: add     x28, x28, #8
+;;       bl      #0xac0
+;;  5c4: add     x28, x28, #8
 ;;       mov     sp, x28
 ;;       ldr     x9, [x28, #0xbd0]
 ;;       sub     x28, x28, #8
@@ -919,8 +925,8 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #4
-;;       bl      #0xaa0
-;;  5e4: add     x28, x28, #4
+;;       bl      #0xac0
+;;  5fc: add     x28, x28, #4
 ;;       mov     sp, x28
 ;;       mov     x16, #0xc44
 ;;       ldr     x9, [x28, x16, sxtx]
@@ -932,8 +938,9 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #0
-;;       bl      #0xaa0
-;;  618: ldr     x9, [x28, #0xcb8]
+;;       bl      #0xac0
+;;  630: mov     sp, x28
+;;       ldr     x9, [x28, #0xcb8]
 ;;       sub     x28, x28, #8
 ;;       mov     sp, x28
 ;;       stur    d0, [x28]
@@ -944,8 +951,8 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #0xc
-;;       bl      #0xaa0
-;;  648: add     x28, x28, #0xc
+;;       bl      #0xac0
+;;  664: add     x28, x28, #0xc
 ;;       mov     sp, x28
 ;;       mov     x16, #0xd2c
 ;;       ldr     x9, [x28, x16, sxtx]
@@ -959,8 +966,8 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #8
-;;       bl      #0xaa0
-;;  684: add     x28, x28, #8
+;;       bl      #0xac0
+;;  6a0: add     x28, x28, #8
 ;;       mov     sp, x28
 ;;       ldr     x9, [x28, #0xda0]
 ;;       sub     x28, x28, #8
@@ -973,8 +980,8 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #4
-;;       bl      #0xaa0
-;;  6bc: add     x28, x28, #4
+;;       bl      #0xac0
+;;  6d8: add     x28, x28, #4
 ;;       mov     sp, x28
 ;;       mov     x16, #0xe14
 ;;       ldr     x9, [x28, x16, sxtx]
@@ -986,8 +993,9 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #0
-;;       bl      #0xaa0
-;;  6f0: ldr     x9, [x28, #0xe88]
+;;       bl      #0xac0
+;;  70c: mov     sp, x28
+;;       ldr     x9, [x28, #0xe88]
 ;;       sub     x28, x28, #8
 ;;       mov     sp, x28
 ;;       stur    d0, [x28]
@@ -998,8 +1006,8 @@
 ;;       mov     x1, x9
 ;;       mov     x2, x9
 ;;       add     x0, x28, #0xc
-;;       bl      #0xaa0
-;;  720: add     x28, x28, #0xc
+;;       bl      #0xac0
+;;  740: add     x28, x28, #0xc
 ;;       mov     sp, x28
 ;;       mov     x16, #0xefc
 ;;       ldr     x9, [x28, x16, sxtx]
@@ -1097,7 +1105,7 @@
 ;;       ldr     x28, [sp], #0x10
 ;;       ldp     x29, x30, [sp], #0x10
 ;;       ret
-;;  8a8: udf     #0xc11f
+;;  8c8: udf     #0xc11f
 ;;
 ;; wasm[0]::function[1]:
 ;;       stp     x29, x30, [sp, #-0x10]!
@@ -1110,43 +1118,43 @@
 ;;       movk    x17, #0x84
 ;;       add     x16, x16, x17
 ;;       cmp     sp, x16
-;;       b.lo    #0xa7c
-;;  8ec: mov     x9, x1
+;;       b.lo    #0xa9c
+;;  90c: mov     x9, x1
 ;;       sub     x28, x28, #0x18
 ;;       mov     sp, x28
 ;;       stur    x1, [x28, #0x10]
 ;;       stur    x2, [x28, #8]
 ;;       stur    x0, [x28]
-;;       ldr     d0, #0xa80
+;;       ldr     d0, #0xaa0
 ;;       sub     x28, x28, #0x6c
 ;;       mov     sp, x28
 ;;       mov     x16, #0
 ;;       stur    x16, [x28]
-;;       ldr     d31, #0xa80
+;;       ldr     d31, #0xaa0
 ;;       stur    d31, [x28, #8]
-;;       ldr     d31, #0xa80
+;;       ldr     d31, #0xaa0
 ;;       stur    d31, [x28, #0x10]
-;;       ldr     d31, #0xa80
+;;       ldr     d31, #0xaa0
 ;;       stur    d31, [x28, #0x18]
-;;       ldr     d31, #0xa80
+;;       ldr     d31, #0xaa0
 ;;       stur    d31, [x28, #0x20]
-;;       ldr     d31, #0xa80
+;;       ldr     d31, #0xaa0
 ;;       stur    d31, [x28, #0x28]
-;;       ldr     d31, #0xa80
+;;       ldr     d31, #0xaa0
 ;;       stur    d31, [x28, #0x30]
-;;       ldr     d31, #0xa80
+;;       ldr     d31, #0xaa0
 ;;       stur    d31, [x28, #0x38]
-;;       ldr     d31, #0xa80
+;;       ldr     d31, #0xaa0
 ;;       stur    d31, [x28, #0x40]
-;;       ldr     d31, #0xa80
+;;       ldr     d31, #0xaa0
 ;;       stur    d31, [x28, #0x48]
-;;       ldr     d31, #0xa80
+;;       ldr     d31, #0xaa0
 ;;       stur    d31, [x28, #0x50]
-;;       ldr     d31, #0xa80
+;;       ldr     d31, #0xaa0
 ;;       stur    d31, [x28, #0x58]
-;;       ldr     s31, #0xa88
+;;       ldr     s31, #0xaa8
 ;;       stur    s31, [x28, #0x60]
-;;       ldr     d31, #0xa80
+;;       ldr     d31, #0xaa0
 ;;       stur    d31, [x28, #0x64]
 ;;       ldur    x0, [x28, #0x6c]
 ;;       ldur    x16, [x28]
@@ -1211,10 +1219,10 @@
 ;;       ldr     x28, [sp], #0x10
 ;;       ldp     x29, x30, [sp], #0x10
 ;;       ret
-;;  a7c: udf     #0xc11f
-;;  a80: udf     #0
-;;  a84: udf     #0
-;;  a88: udf     #0
+;;  a9c: udf     #0xc11f
+;;  aa0: udf     #0
+;;  aa4: udf     #0
+;;  aa8: udf     #0
 ;;
 ;; wasm[0]::function[2]:
 ;;       stp     x29, x30, [sp, #-0x10]!
@@ -1227,43 +1235,43 @@
 ;;       movk    x17, #0x84
 ;;       add     x16, x16, x17
 ;;       cmp     sp, x16
-;;       b.lo    #0xc5c
-;;  acc: mov     x9, x1
+;;       b.lo    #0xc7c
+;;  aec: mov     x9, x1
 ;;       sub     x28, x28, #0x18
 ;;       mov     sp, x28
 ;;       stur    x1, [x28, #0x10]
 ;;       stur    x2, [x28, #8]
 ;;       stur    x0, [x28]
-;;       ldr     d0, #0xc60
+;;       ldr     d0, #0xc80
 ;;       sub     x28, x28, #0x6c
 ;;       mov     sp, x28
 ;;       mov     x16, #0
 ;;       stur    x16, [x28]
-;;       ldr     d31, #0xc60
+;;       ldr     d31, #0xc80
 ;;       stur    d31, [x28, #8]
-;;       ldr     d31, #0xc60
+;;       ldr     d31, #0xc80
 ;;       stur    d31, [x28, #0x10]
-;;       ldr     d31, #0xc60
+;;       ldr     d31, #0xc80
 ;;       stur    d31, [x28, #0x18]
-;;       ldr     d31, #0xc60
+;;       ldr     d31, #0xc80
 ;;       stur    d31, [x28, #0x20]
-;;       ldr     d31, #0xc60
+;;       ldr     d31, #0xc80
 ;;       stur    d31, [x28, #0x28]
-;;       ldr     d31, #0xc60
+;;       ldr     d31, #0xc80
 ;;       stur    d31, [x28, #0x30]
-;;       ldr     d31, #0xc60
+;;       ldr     d31, #0xc80
 ;;       stur    d31, [x28, #0x38]
-;;       ldr     d31, #0xc60
+;;       ldr     d31, #0xc80
 ;;       stur    d31, [x28, #0x40]
-;;       ldr     d31, #0xc60
+;;       ldr     d31, #0xc80
 ;;       stur    d31, [x28, #0x48]
-;;       ldr     d31, #0xc60
+;;       ldr     d31, #0xc80
 ;;       stur    d31, [x28, #0x50]
-;;       ldr     d31, #0xc60
+;;       ldr     d31, #0xc80
 ;;       stur    d31, [x28, #0x58]
-;;       ldr     s31, #0xc68
+;;       ldr     s31, #0xc88
 ;;       stur    s31, [x28, #0x60]
-;;       ldr     d31, #0xc60
+;;       ldr     d31, #0xc80
 ;;       stur    d31, [x28, #0x64]
 ;;       ldur    x0, [x28, #0x6c]
 ;;       ldur    x16, [x28]
@@ -1328,7 +1336,7 @@
 ;;       ldr     x28, [sp], #0x10
 ;;       ldp     x29, x30, [sp], #0x10
 ;;       ret
-;;  c5c: udf     #0xc11f
-;;  c60: udf     #0
-;;  c64: udf     #0
-;;  c68: udf     #0
+;;  c7c: udf     #0xc11f
+;;  c80: udf     #0
+;;  c84: udf     #0
+;;  c88: udf     #0

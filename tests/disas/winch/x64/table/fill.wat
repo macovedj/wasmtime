@@ -78,7 +78,7 @@
 ;;       movq    0x18(%r11), %r11
 ;;       addq    $0x40, %r11
 ;;       cmpq    %rsp, %r11
-;;       ja      0x22a
+;;       ja      0x227
 ;;   dc: movq    %rdi, %r14
 ;;       subq    $0x30, %rsp
 ;;       movq    %rdi, 0x28(%rsp)
@@ -96,7 +96,7 @@
 ;;       movq    %r14, %rdx
 ;;       movq    0x38(%rdx), %rbx
 ;;       cmpq    %rbx, %rcx
-;;       jae     0x22c
+;;       jae     0x229
 ;;  138: movq    %rcx, %r11
 ;;       imulq   $8, %r11, %r11
 ;;       movq    0x30(%rdx), %rdx
@@ -106,19 +106,19 @@
 ;;       cmovaeq %rsi, %rdx
 ;;       movq    (%rdx), %rax
 ;;       testq   %rax, %rax
-;;       jne     0x199
+;;       jne     0x196
 ;;  15f: subq    $4, %rsp
 ;;       movl    %ecx, (%rsp)
 ;;       subq    $0xc, %rsp
 ;;       movq    %r14, %rdi
 ;;       movl    $0, %esi
 ;;       movl    0xc(%rsp), %edx
-;;       callq   0x575
-;;       addq    $0xc, %rsp
+;;       callq   0x582
+;;       leaq    -0x34(%rbp), %rsp
 ;;       addq    $4, %rsp
 ;;       movq    0x28(%rsp), %r14
-;;       jmp     0x19f
-;;  199: andq    $0xfffffffffffffffe, %rax
+;;       jmp     0x19c
+;;  196: andq    $0xfffffffffffffffe, %rax
 ;;       movq    %rax, 0xc(%rsp)
 ;;       movl    0x14(%rsp), %eax
 ;;       movq    0xc(%rsp), %rcx
@@ -127,18 +127,18 @@
 ;;       movq    0x48(%r11), %rbx
 ;;       movl    %edx, %esi
 ;;       addl    %eax, %esi
-;;       jb      0x22e
-;;  1c2: cmpl    %ebx, %esi
-;;       ja      0x230
-;;  1ca: cmpq    $0, %rax
-;;       je      0x221
-;;  1d4: movq    %rdx, %rbx
+;;       jb      0x22b
+;;  1bf: cmpl    %ebx, %esi
+;;       ja      0x22d
+;;  1c7: cmpq    $0, %rax
+;;       je      0x21e
+;;  1d1: movq    %rdx, %rbx
 ;;       movq    %rcx, %rsi
 ;;       movq    %r14, %rdi
 ;;       movq    0x48(%rdi), %r8
 ;;       cmpq    %r8, %rbx
-;;       jae     0x232
-;;  1ea: movq    %rbx, %r11
+;;       jae     0x22f
+;;  1e7: movq    %rbx, %r11
 ;;       imulq   $8, %r11, %r11
 ;;       movq    0x40(%rdi), %rdi
 ;;       movq    %rdi, %r9
@@ -149,12 +149,12 @@
 ;;       movq    %rsi, (%rdi)
 ;;       addq    $1, %rdx
 ;;       subq    $1, %rax
-;;       jmp     0x1ca
-;;  221: addq    $0x30, %rsp
+;;       jmp     0x1c7
+;;  21e: addq    $0x30, %rsp
 ;;       popq    %rbp
 ;;       retq
-;;  22a: ud2
-;;  22c: ud2
-;;  22e: ud2
-;;  230: ud2
-;;  232: ud2
+;;  227: ud2
+;;  229: ud2
+;;  22b: ud2
+;;  22d: ud2
+;;  22f: ud2

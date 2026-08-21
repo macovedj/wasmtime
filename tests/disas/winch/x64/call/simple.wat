@@ -21,7 +21,7 @@
 ;;       movq    0x18(%r11), %r11
 ;;       addq    $0x28, %r11
 ;;       cmpq    %rsp, %r11
-;;       ja      0x97
+;;       ja      0x9b
 ;;   1c: movq    %rdi, %r14
 ;;       subq    $0x20, %rsp
 ;;       movq    %rdi, 0x18(%rsp)
@@ -32,6 +32,7 @@
 ;;       movl    $0x14, %edx
 ;;       movl    $0x50, %ecx
 ;;       callq   0xa0
+;;       leaq    -0x20(%rbp), %rsp
 ;;       movq    0x18(%rsp), %r14
 ;;       movl    $2, %ecx
 ;;       movl    %ecx, 0xc(%rsp)
@@ -49,7 +50,7 @@
 ;;       addq    $0x20, %rsp
 ;;       popq    %rbp
 ;;       retq
-;;   97: ud2
+;;   9b: ud2
 ;;
 ;; wasm[0]::function[1]::product:
 ;;       pushq   %rbp
