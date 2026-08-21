@@ -4,7 +4,7 @@ use wasmtime_test_macros::wasmtime_test;
 #[wasmtime_test(strategies(only(Winch)))]
 #[cfg_attr(miri, ignore)]
 fn tail_calls_preserve_caller_clean_stack(config: &mut Config) -> Result<()> {
-    if !cfg!(target_arch = "x86_64") {
+    if !cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
         return Ok(());
     }
 
@@ -70,7 +70,7 @@ fn tail_calls_preserve_caller_clean_stack(config: &mut Config) -> Result<()> {
 #[wasmtime_test(strategies(only(Winch)))]
 #[cfg_attr(miri, ignore)]
 fn tail_call_to_imported_wasm_function(config: &mut Config) -> Result<()> {
-    if !cfg!(target_arch = "x86_64") {
+    if !cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
         return Ok(());
     }
 
@@ -120,7 +120,7 @@ fn tail_call_to_imported_wasm_function(config: &mut Config) -> Result<()> {
 #[wasmtime_test(strategies(only(Winch)))]
 #[cfg_attr(miri, ignore)]
 fn tail_call_indirect_preserves_caller_clean_stack(config: &mut Config) -> Result<()> {
-    if !cfg!(target_arch = "x86_64") {
+    if !cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
         return Ok(());
     }
 
@@ -194,7 +194,7 @@ fn tail_call_indirect_preserves_caller_clean_stack(config: &mut Config) -> Resul
 #[wasmtime_test(strategies(only(Winch)))]
 #[cfg_attr(miri, ignore)]
 fn tail_call_indirect_traps(config: &mut Config) -> Result<()> {
-    if !cfg!(target_arch = "x86_64") {
+    if !cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
         return Ok(());
     }
 
@@ -237,7 +237,7 @@ fn tail_call_indirect_traps(config: &mut Config) -> Result<()> {
 #[wasmtime_test(strategies(only(Winch)))]
 #[cfg_attr(miri, ignore)]
 fn tail_calls_forward_stack_results(config: &mut Config) -> Result<()> {
-    if !cfg!(target_arch = "x86_64") {
+    if !cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
         return Ok(());
     }
 

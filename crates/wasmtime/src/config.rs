@@ -2478,7 +2478,7 @@ impl Config {
 
                 match self.compiler_target().architecture {
                     target_lexicon::Architecture::Aarch64(_) => {
-                        unsupported |= WasmFeatures::THREADS | WasmFeatures::TAIL_CALL;
+                        unsupported |= WasmFeatures::THREADS;
                     }
 
                     // Winch doesn't support other non-x64 architectures at this

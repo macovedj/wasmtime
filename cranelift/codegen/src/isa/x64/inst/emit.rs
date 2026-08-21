@@ -1869,9 +1869,11 @@ fn restore_winch_call_stack_pointer<T>(
     state: &mut EmitState,
     call_info: &CallInfo<T>,
 ) {
-    if call_info.callee_conv != CallConv::Winch {
+    if !call_info.restore_sp_from_fp {
         return;
     }
+
+    debug_assert_eq!(call_info.callee_conv, CallConv::Winch);
 
     assert!(
         info.flags.preserve_frame_pointers(),

@@ -464,7 +464,7 @@ impl Compiler {
                 }
 
                 if cfg!(target_arch = "aarch64") {
-                    return config.threads() || config.tail_call();
+                    return config.threads();
                 }
 
                 !cfg!(target_arch = "x86_64")

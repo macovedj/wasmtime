@@ -2978,6 +2978,8 @@ impl MachInstEmit for Inst {
                     sink.add_call_site();
                 }
 
+                restore_winch_call_stack_pointer(sink, emit_info, state, info);
+
                 if info.callee_pop_size > 0 {
                     let callee_pop_size =
                         i32::try_from(info.callee_pop_size).expect("callee popped more than 2GB");
@@ -3028,6 +3030,8 @@ impl MachInstEmit for Inst {
                 } else {
                     sink.add_call_site();
                 }
+
+                restore_winch_call_stack_pointer(sink, emit_info, state, info);
 
                 if info.callee_pop_size > 0 {
                     let callee_pop_size =
@@ -3658,6 +3662,43 @@ impl MachInstEmit for Inst {
 
     fn pretty_print_inst(&self, state: &mut Self::State) -> String {
         self.print_with_state(state)
+    }
+}
+
+/// Restore SP after a call into Winch-compiled code.
+///
+/// A Winch tail-call chain can return with real SP at a differently-sized
+/// incoming argument area. Cranelift-generated callers recover their canonical
+/// active-frame position from FP before accessing return values or continuing.
+fn restore_winch_call_stack_pointer<T>(
+    sink: &mut MachBuffer<Inst>,
+    emit_info: &EmitInfo,
+    state: &mut EmitState,
+    call_info: &CallInfo<T>,
+) {
+    if !call_info.restore_sp_from_fp {
+        return;
+    }
+
+    debug_assert_eq!(call_info.callee_conv, CallConv::Winch);
+    assert!(
+        state.frame_layout().setup_area_size > 0,
+        "calls into Winch code require a frame pointer to recover SP after a tail call"
+    );
+
+    Inst::AluRRImm12 {
+        alu_op: ALUOp::Add,
+        size: OperandSize::Size64,
+        rd: writable_stack_reg(),
+        rn: fp_reg(),
+        imm12: Imm12::maybe_from_u64(0).unwrap(),
+    }
+    .emit(sink, emit_info, state);
+
+    let fp_to_sp = i32::try_from(state.frame_layout().sp_to_fp())
+        .expect("frame size is too large to fit in a 32-bit immediate");
+    for inst in AArch64MachineDeps::gen_sp_reg_adjust(-fp_to_sp) {
+        inst.emit(sink, emit_info, state);
     }
 }
 
