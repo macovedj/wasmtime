@@ -42,7 +42,10 @@ fn engine(strategy: Strategy, tail_calls: bool) -> Engine {
 }
 
 fn bench_runtime(c: &mut Criterion, ordinary_only: bool) {
-    let mut group = c.benchmark_group("tail-calls/runtime");
+    // Keep Criterion baselines architecture-specific. In particular, running
+    // an x86-64 binary under Rosetta from an AArch64 host must not overwrite
+    // the native AArch64 comparison data.
+    let mut group = c.benchmark_group(format!("tail-calls/{}/runtime", std::env::consts::ARCH));
     group.throughput(Throughput::Elements(RUNTIME_CALLS));
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(3));
@@ -85,7 +88,7 @@ fn bench_runtime(c: &mut Criterion, ordinary_only: bool) {
 }
 
 fn bench_compile(c: &mut Criterion, ordinary_only: bool) {
-    let mut group = c.benchmark_group("tail-calls/compile");
+    let mut group = c.benchmark_group(format!("tail-calls/{}/compile", std::env::consts::ARCH));
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(3));
     group.sample_size(20);
@@ -109,7 +112,10 @@ fn bench_compile(c: &mut Criterion, ordinary_only: bool) {
 }
 
 fn report_artifact_sizes(ordinary_only: bool) {
-    println!("precompiled artifact bytes ({COMPILE_FUNCTIONS} high-arity functions)");
+    println!(
+        "precompiled artifact bytes for {} ({COMPILE_FUNCTIONS} high-arity functions)",
+        std::env::consts::ARCH
+    );
     for strategy in [Strategy::Winch, Strategy::Cranelift] {
         for tail_calls in [false, true] {
             if ordinary_only && tail_calls {
