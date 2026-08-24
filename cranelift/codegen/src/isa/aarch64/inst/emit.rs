@@ -3680,7 +3680,7 @@ fn restore_winch_call_stack_pointer<T>(
         return;
     }
 
-    debug_assert_eq!(call_info.callee_conv, CallConv::Winch);
+    assert_eq!(call_info.callee_conv, CallConv::Winch);
     assert!(
         state.frame_layout().setup_area_size > 0,
         "calls into Winch code require a frame pointer to recover SP after a tail call"

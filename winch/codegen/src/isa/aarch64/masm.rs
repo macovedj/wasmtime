@@ -464,8 +464,8 @@ impl Masm for MacroAssembler {
     ) -> Result<()> {
         let word_bytes = u32::from(<Self::ABI as ABI>::word_bytes());
         let alignment = u32::from(<Self::ABI as ABI>::call_stack_align());
-        debug_assert_eq!(caller_stack_args_size % alignment, 0);
-        debug_assert_eq!(callee_stack_args_size % alignment, 0);
+        assert_eq!(caller_stack_args_size % alignment, 0);
+        assert_eq!(callee_stack_args_size % alignment, 0);
 
         let caller_args = i64::from(caller_stack_args_size);
         let callee_args = i64::from(callee_stack_args_size);

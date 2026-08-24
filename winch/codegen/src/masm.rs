@@ -1487,12 +1487,10 @@ pub(crate) trait MacroAssembler {
     /// adding a return address.
     fn tail_call(
         &mut self,
-        _caller_stack_args_size: u32,
-        _callee_stack_args_size: u32,
-        _callee: CalleeKind,
-    ) -> Result<()> {
-        crate::bail!(crate::codegen::CodeGenError::unimplemented_wasm_instruction())
-    }
+        caller_stack_args_size: u32,
+        callee_stack_args_size: u32,
+        callee: CalleeKind,
+    ) -> Result<()>;
 
     /// Record a GC stack map at the current code offset, which must be the
     /// return address of the call emitted immediately before. Each offset is

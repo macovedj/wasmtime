@@ -1873,7 +1873,7 @@ fn restore_winch_call_stack_pointer<T>(
         return;
     }
 
-    debug_assert_eq!(call_info.callee_conv, CallConv::Winch);
+    assert_eq!(call_info.callee_conv, CallConv::Winch);
 
     assert!(
         info.flags.preserve_frame_pointers(),
