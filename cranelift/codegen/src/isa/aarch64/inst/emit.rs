@@ -2978,7 +2978,7 @@ impl MachInstEmit for Inst {
                     sink.add_call_site();
                 }
 
-                restore_winch_call_stack_pointer(sink, emit_info, state, info);
+                adjust_post_call_stack_pointer(sink, emit_info, state, info);
 
                 if info.callee_pop_size > 0 {
                     let callee_pop_size =
@@ -3031,7 +3031,7 @@ impl MachInstEmit for Inst {
                     sink.add_call_site();
                 }
 
-                restore_winch_call_stack_pointer(sink, emit_info, state, info);
+                adjust_post_call_stack_pointer(sink, emit_info, state, info);
 
                 if info.callee_pop_size > 0 {
                     let callee_pop_size =
@@ -3665,25 +3665,21 @@ impl MachInstEmit for Inst {
     }
 }
 
-/// Restore SP after a call into Winch-compiled code.
-///
-/// A Winch tail-call chain can return with real SP at a differently-sized
-/// incoming argument area. Cranelift-generated callers recover their canonical
-/// active-frame position from FP before accessing return values or continuing.
-fn restore_winch_call_stack_pointer<T>(
+/// Apply the call ABI's requested post-call stack-pointer adjustment.
+fn adjust_post_call_stack_pointer<T>(
     sink: &mut MachBuffer<Inst>,
     emit_info: &EmitInfo,
     state: &mut EmitState,
     call_info: &CallInfo<T>,
 ) {
-    if !call_info.restore_sp_from_fp {
-        return;
+    match call_info.post_call_stack_adjustment {
+        PostCallStackAdjustment::None => return,
+        PostCallStackAdjustment::RestoreFromFramePointer => {}
     }
 
-    assert_eq!(call_info.callee_conv, CallConv::Winch);
     assert!(
         state.frame_layout().setup_area_size > 0,
-        "calls into Winch code require a frame pointer to recover SP after a tail call"
+        "post-call SP restoration requires an active frame pointer"
     );
 
     Inst::AluRRImm12 {

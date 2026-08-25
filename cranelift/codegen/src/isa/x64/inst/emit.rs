@@ -435,7 +435,7 @@ pub(crate) fn emit(
                 sink.add_call_site();
             }
 
-            restore_winch_call_stack_pointer(sink, info, state, &call_info);
+            adjust_post_call_stack_pointer(sink, info, state, &call_info);
 
             // Reclaim the outgoing argument area that was released by the
             // callee, to ensure that StackAMode values are always computed from
@@ -519,7 +519,7 @@ pub(crate) fn emit(
                 sink.add_call_site();
             }
 
-            restore_winch_call_stack_pointer(sink, info, state, &call_info);
+            adjust_post_call_stack_pointer(sink, info, state, &call_info);
 
             // Reclaim the outgoing argument area that was released by the callee, to ensure that
             // StackAMode values are always computed from a consistent SP.
@@ -1858,26 +1858,21 @@ pub(crate) fn emit(
     state.clear_post_insn();
 }
 
-/// Restore the stack pointer after a call into Winch-compiled code.
-///
-/// Winch tail calls preserve their caller-clean ABI by allowing the final
-/// callee to return with a differently-sized argument area. Recovering SP from
-/// FP makes the Cranelift-generated trampoline independent of that size.
-fn restore_winch_call_stack_pointer<T>(
+/// Apply the call ABI's requested post-call stack-pointer adjustment.
+fn adjust_post_call_stack_pointer<T>(
     sink: &mut MachBuffer<Inst>,
     info: &EmitInfo,
     state: &mut EmitState,
     call_info: &CallInfo<T>,
 ) {
-    if !call_info.restore_sp_from_fp {
-        return;
+    match call_info.post_call_stack_adjustment {
+        PostCallStackAdjustment::None => return,
+        PostCallStackAdjustment::RestoreFromFramePointer => {}
     }
 
-    assert_eq!(call_info.callee_conv, CallConv::Winch);
-
     assert!(
-        info.flags.preserve_frame_pointers(),
-        "calls into Winch code require a frame pointer to recover SP after a tail call"
+        state.frame_layout().setup_area_size > 0,
+        "post-call SP restoration requires an active frame pointer"
     );
     let fp_to_sp = i32::try_from(state.frame_layout().sp_to_fp())
         .expect("frame size is too large to fit in a 32-bit immediate");

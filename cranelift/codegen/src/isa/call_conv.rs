@@ -41,7 +41,11 @@ pub enum CallConv {
     ///
     /// The main difference to SystemV is that the winch calling convention
     /// defines no callee-save registers, and restricts the number of return
-    /// registers to one integer, and one floating point.
+    /// registers to one integer, and one floating point. Stack arguments are
+    /// caller-clean, but a callee may tail-call a function with a differently
+    /// sized stack-argument area. Callers must therefore reestablish their
+    /// canonical stack pointer from stable caller-owned frame state after a
+    /// call before accessing their stack frame.
     Winch,
     /// Calling convention optimized for callsite efficiency, at the
     /// cost of the callee. It does so by not clobbering any

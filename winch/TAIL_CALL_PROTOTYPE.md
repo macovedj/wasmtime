@@ -48,6 +48,16 @@ carry explicit call metadata requesting the equivalent FP-based recovery.
 Hand-emitted Winch calls perform their own recovery, avoiding the duplicate
 restore previously visible in the indirect-call lazy-initialization path.
 
+This is a narrow change to the internal Winch calling-convention contract:
+stack arguments remain caller-clean, but callers may no longer derive their
+post-call SP from the physical SP returned by the callee. They must recover it
+from stable caller-owned frame state before accessing their frame. Argument and
+result locations, VMContext passing, and the return-area pointer are unchanged.
+The Cranelift ABI layer makes this post-call behavior an architecture-owned
+choice; x86-64 and AArch64 select frame-pointer recovery, while unsupported
+backends explicitly select no adjustment and assert that adjustment metadata
+is never silently ignored.
+
 ## Correctness coverage
 
 Both x86-64 and AArch64 pass focused tests for:

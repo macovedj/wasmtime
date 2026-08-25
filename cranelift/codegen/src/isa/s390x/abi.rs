@@ -608,6 +608,10 @@ impl ABIMachineSpec for S390xMachineDeps {
         insts
     }
 
+    fn post_call_stack_adjustment(_call_conv: isa::CallConv) -> PostCallStackAdjustment {
+        PostCallStackAdjustment::None
+    }
+
     fn gen_prologue_frame_setup(
         _call_conv: isa::CallConv,
         _flags: &settings::Flags,

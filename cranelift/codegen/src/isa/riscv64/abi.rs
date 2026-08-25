@@ -328,6 +328,10 @@ impl ABIMachineSpec for Riscv64MachineDeps {
         insts
     }
 
+    fn post_call_stack_adjustment(_call_conv: isa::CallConv) -> PostCallStackAdjustment {
+        PostCallStackAdjustment::None
+    }
+
     fn gen_prologue_frame_setup(
         _call_conv: isa::CallConv,
         flags: &settings::Flags,
@@ -595,7 +599,7 @@ impl ABIMachineSpec for Riscv64MachineDeps {
                 callee_pop_size: 0,
                 try_call_info: None,
                 patchable: false,
-                restore_sp_from_fp: false,
+                post_call_stack_adjustment: PostCallStackAdjustment::None,
             }),
         });
         insts
