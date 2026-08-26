@@ -535,6 +535,13 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         smallvec![inst]
     }
 
+    fn post_call_stack_adjustment(call_conv: isa::CallConv) -> PostCallStackAdjustment {
+        match call_conv {
+            CallConv::Winch => PostCallStackAdjustment::RestoreFromFramePointer,
+            _ => PostCallStackAdjustment::None,
+        }
+    }
+
     fn gen_prologue_frame_setup(
         _call_conv: isa::CallConv,
         flags: &settings::Flags,
@@ -855,7 +862,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
             caller_conv: call_conv,
             try_call_info: None,
             patchable: false,
-            restore_sp_from_fp: false,
+            post_call_stack_adjustment: PostCallStackAdjustment::None,
         })));
         insts
     }

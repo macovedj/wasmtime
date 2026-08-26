@@ -614,6 +614,13 @@ impl ABIMachineSpec for AArch64MachineDeps {
         ret
     }
 
+    fn post_call_stack_adjustment(call_conv: isa::CallConv) -> PostCallStackAdjustment {
+        match call_conv {
+            isa::CallConv::Winch => PostCallStackAdjustment::RestoreFromFramePointer,
+            _ => PostCallStackAdjustment::None,
+        }
+    }
+
     fn gen_prologue_frame_setup(
         call_conv: isa::CallConv,
         flags: &settings::Flags,
@@ -1157,7 +1164,7 @@ impl ABIMachineSpec for AArch64MachineDeps {
                 callee_pop_size: 0,
                 try_call_info: None,
                 patchable: false,
-                restore_sp_from_fp: false,
+                post_call_stack_adjustment: PostCallStackAdjustment::None,
             }),
         });
         insts

@@ -292,6 +292,10 @@ where
         smallvec![inst.into()]
     }
 
+    fn post_call_stack_adjustment(_call_conv: isa::CallConv) -> PostCallStackAdjustment {
+        PostCallStackAdjustment::None
+    }
+
     /// Generates the entire prologue for the function.
     ///
     /// Note that this is different from other backends where it's not spread

@@ -167,6 +167,10 @@ fn pulley_emit<P>(
         }
 
         Inst::Call { info } => {
+            assert_eq!(
+                info.post_call_stack_adjustment,
+                PostCallStackAdjustment::None
+            );
             let start = sink.cur_offset();
 
             // If arguments happen to already be in the right register for the
@@ -233,6 +237,10 @@ fn pulley_emit<P>(
         }
 
         Inst::IndirectCall { info } => {
+            assert_eq!(
+                info.post_call_stack_adjustment,
+                PostCallStackAdjustment::None
+            );
             enc::call_indirect(sink, info.dest);
 
             if let Some(s) = state.take_stack_map() {

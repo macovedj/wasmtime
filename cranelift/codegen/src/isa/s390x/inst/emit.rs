@@ -3473,6 +3473,10 @@ impl Inst {
                 state.nominal_sp_offset += size;
             }
             &Inst::Call { link, ref info } => {
+                assert_eq!(
+                    info.post_call_stack_adjustment,
+                    PostCallStackAdjustment::None
+                );
                 let start = sink.cur_offset();
 
                 let enc: &[u8] = match &info.dest {

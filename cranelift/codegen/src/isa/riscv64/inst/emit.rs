@@ -1194,6 +1194,10 @@ impl Inst {
             }
 
             &Inst::Call { ref info } => {
+                assert_eq!(
+                    info.post_call_stack_adjustment,
+                    PostCallStackAdjustment::None
+                );
                 sink.add_reloc(Reloc::RiscvCallPlt, &info.dest, 0);
 
                 let start = sink.cur_offset();
@@ -1245,6 +1249,10 @@ impl Inst {
                 *start_off = sink.cur_offset();
             }
             &Inst::CallInd { ref info } => {
+                assert_eq!(
+                    info.post_call_stack_adjustment,
+                    PostCallStackAdjustment::None
+                );
                 Inst::Jalr {
                     rd: writable_link_reg(),
                     base: info.dest,
