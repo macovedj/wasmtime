@@ -56,6 +56,7 @@ block0(v0:i64, v1:i64, v2:i64, v3:i64, v4:i64, v5:i64):
 ;   movq %rdi, (%rsp)
 ;   movabsq $0, %r10 ; reloc_external Abs8 %g 0
 ;   callq *%r10
+;   leaq -0x10(%rbp), %rsp
 ;   movq (%rsp), %rax
 ;   addq $0x10, %rsp
 ;   movq %rbp, %rsp
@@ -109,6 +110,7 @@ block0(v0:i64, v1:i64, v2:i64, v3:i64, v4:i64, v5:i64):
 ;   movq %rdi, (%rsp)
 ;   movabsq $0, %r10 ; reloc_external Abs8 %g 0
 ;   callq *%r10
+;   leaq -0x40(%rbp), %rsp
 ;   movq (%rsp), %rax
 ;   movq 0x10(%rsp), %rbx
 ;   movq 0x18(%rsp), %r12
@@ -152,6 +154,7 @@ block0(v0:i64, v1:i64, v2:i64, v3:i64, v4:i64, v5:i64):
 ;   movq %r9, %rdi
 ;   movq %rax, %r9
 ;   callq *%r10
+;   leaq (%rbp), %rsp
 ;   movq %rbp, %rsp
 ;   popq %rbp
 ;   retq
@@ -206,6 +209,7 @@ block0(v0:i64, v1:i64, v2:i64, v3:i64, v4:i64, v5:i64):
 ;   movq %r9, %rdi
 ;   movq %rax, %r9
 ;   callq *%r10
+;   leaq -0x30(%rbp), %rsp
 ;   movq (%rsp), %rbx
 ;   movq 8(%rsp), %r12
 ;   movq 0x10(%rsp), %r13
@@ -266,14 +270,95 @@ block0:
 ;   movabsq $0, %r10 ; reloc_external Abs8 u2:0 0
 ;   movq %r10, (%rsp)
 ;   callq *%r10
+;   leaq -0x40(%rbp), %rsp
 ;   movq (%rsp), %r10
 ;   callq *%r10
+;   leaq -0x40(%rbp), %rsp
 ;   movq 0x10(%rsp), %rbx
 ;   movq 0x18(%rsp), %r12
 ;   movq 0x20(%rsp), %r13
 ;   movq 0x28(%rsp), %r14
 ;   movq 0x30(%rsp), %r15
 ;   addq $0x40, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+function %direct_winch_call() winch {
+    fn0 = colocated %direct_callee() winch
+
+block0:
+    call fn0()
+    return
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   call    TestCase(%direct_callee)
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   callq 9 ; reloc_external CallPCRel4 %direct_callee -4
+;   leaq (%rbp), %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+function %try_winch_call() -> i32 winch {
+    sig0 = () winch
+    fn0 = colocated %try_callee sig0
+
+block0:
+    try_call fn0(), sig0, block1(), [ default: block2 ]
+
+block1:
+    v0 = iconst.i32 0
+    return v0
+
+block2:
+    v1 = iconst.i32 1
+    return v1
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   call    TestCase(%try_callee); jmp MachLabel(1); catch [default: MachLabel(2)]
+; block1:
+;   uninit  %rax
+;   xorl %eax, %eax
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+; block2:
+;   movl $0x1, %eax
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   callq 9 ; reloc_external CallPCRel4 %try_callee -4
+;   leaq (%rbp), %rsp
+; block2: ; offset 0xd
+;   xorl %eax, %eax
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+; block3: ; offset 0x14
+;   movl $1, %eax
 ;   movq %rbp, %rsp
 ;   popq %rbp
 ;   retq
@@ -328,6 +413,7 @@ block0(v0:i64):
 ;   leaq (%rsp), %rdi
 ;   movabsq $0, %r10 ; reloc_external Abs8 %g 0
 ;   callq *%r10
+;   leaq -0x50(%rbp), %rsp
 ;   movq 4(%rsp), %r11
 ;   movq %r11, 0x10(%rsp)
 ;   movq (%rsp), %r11
@@ -448,4 +534,3 @@ block0:
 ;   movq %rbp, %rsp
 ;   popq %rbp
 ;   retq
-
