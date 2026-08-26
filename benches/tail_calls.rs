@@ -1,9 +1,10 @@
 //! Measure the caller-clean Winch tail-call prototype.
 //!
-//! Runtime benchmarks cover both the ordinary-call cost of recovering SP from
-//! FP and tail-call chains with fixed, growing, and shrinking stack-argument
-//! areas. Compilation benchmarks use generated high-arity call chains. Set
-//! `WASMTIME_TAIL_CALL_REPORT=1` to print precompiled artifact sizes instead.
+//! Runtime benchmarks compare ordinary and tail-recursive chains with fixed,
+//! growing, and shrinking stack-argument areas, plus equivalent dispatch-loop
+//! and mutual-tail-call state machines. Compilation benchmarks use generated
+//! high-arity call chains. Set `WASMTIME_TAIL_CALL_REPORT=1` to print
+//! precompiled artifact sizes instead.
 
 use criterion::{BenchmarkId, Criterion, Throughput};
 use std::fmt::Write as _;
@@ -11,7 +12,8 @@ use std::hint::black_box;
 use std::time::Duration;
 use wasmtime::{Config, Engine, Module, Store, Strategy};
 
-const RUNTIME_CALLS: u64 = 100_000;
+const RECURSION_DEPTH: u64 = 1_000;
+const STATE_MACHINE_TRANSITIONS: u64 = 100_000;
 const COMPILE_FUNCTIONS: usize = 256;
 
 fn main() {
@@ -46,7 +48,6 @@ fn bench_runtime(c: &mut Criterion, ordinary_only: bool) {
     // an x86-64 binary under Rosetta from an AArch64 host must not overwrite
     // the native AArch64 comparison data.
     let mut group = c.benchmark_group(format!("tail-calls/{}/runtime", std::env::consts::ARCH));
-    group.throughput(Throughput::Elements(RUNTIME_CALLS));
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(3));
     group.sample_size(20);
@@ -55,20 +56,68 @@ fn bench_runtime(c: &mut Criterion, ordinary_only: bool) {
         let compiler = compiler_name(strategy);
 
         let benchmarks = [
-            ("ordinary/register-args", ordinary_register_args(), false),
-            ("ordinary/stack-args", ordinary_stack_args(), false),
+            (
+                "ordinary/register-args",
+                ordinary_fixed_register_args(),
+                false,
+                RECURSION_DEPTH,
+            ),
+            (
+                "ordinary/stack-args",
+                ordinary_fixed_stack_args(),
+                false,
+                RECURSION_DEPTH,
+            ),
             (
                 "ordinary/state-machine-dispatch",
                 ordinary_state_machine_dispatch(),
                 false,
+                STATE_MACHINE_TRANSITIONS,
             ),
-            ("tail/fixed-register-args", tail_fixed_register_args(), true),
-            ("tail/fixed-stack-args", tail_fixed_stack_args(), true),
-            ("tail/resize-direct", tail_resize_direct(), true),
-            ("tail/resize-indirect", tail_resize_indirect(), true),
-            ("tail/state-machine", tail_state_machine(), true),
+            (
+                "ordinary/resize-direct",
+                ordinary_resize_direct(),
+                false,
+                RECURSION_DEPTH,
+            ),
+            (
+                "ordinary/resize-indirect",
+                ordinary_resize_indirect(),
+                false,
+                RECURSION_DEPTH,
+            ),
+            (
+                "tail/fixed-register-args",
+                tail_fixed_register_args(),
+                true,
+                RECURSION_DEPTH,
+            ),
+            (
+                "tail/fixed-stack-args",
+                tail_fixed_stack_args(),
+                true,
+                RECURSION_DEPTH,
+            ),
+            (
+                "tail/resize-direct",
+                tail_resize_direct(),
+                true,
+                RECURSION_DEPTH,
+            ),
+            (
+                "tail/resize-indirect",
+                tail_resize_indirect(),
+                true,
+                RECURSION_DEPTH,
+            ),
+            (
+                "tail/state-machine",
+                tail_state_machine(),
+                true,
+                STATE_MACHINE_TRANSITIONS,
+            ),
         ];
-        for (name, wat, tail_calls) in benchmarks {
+        for (name, wat, tail_calls, iterations) in benchmarks {
             if ordinary_only && tail_calls {
                 continue;
             }
@@ -84,13 +133,14 @@ fn bench_runtime(c: &mut Criterion, ordinary_only: bool) {
                 // Both fixtures implement four alternating transitions:
                 // 0 + 3 + 5 + 3 + 5.
                 assert_eq!(run.call(&mut store, 4).unwrap(), 16);
+            } else {
+                assert_eq!(run.call(&mut store, 4).unwrap(), 42);
             }
 
+            group.throughput(Throughput::Elements(iterations));
             group.bench_function(BenchmarkId::new(name, compiler), |b| {
                 b.iter(|| {
-                    let result = run
-                        .call(&mut store, black_box(RUNTIME_CALLS as i64))
-                        .unwrap();
+                    let result = run.call(&mut store, black_box(iterations as i64)).unwrap();
                     black_box(result);
                 });
             });
@@ -165,57 +215,64 @@ fn compile_fixture(tail_calls: bool) -> Vec<u8> {
     wat::parse_str(wat).unwrap()
 }
 
-fn ordinary_register_args() -> &'static str {
+fn ordinary_fixed_register_args() -> &'static str {
     r#"
         (module
-          (func $callee)
-          (func (export "run") (param $count i64) (result i64)
-            (local $i i64)
+          (func $ordinary (param $count i64) (result i64)
             local.get $count
-            local.set $i
-            loop $loop
-              call $callee
-              local.get $i
+            i64.eqz
+            if (result i64)
+              i64.const 42
+            else
+              local.get $count
               i64.const 1
               i64.sub
-              local.tee $i
-              i64.const 0
-              i64.ne
-              br_if $loop
-            end
-            local.get $count))
+              call $ordinary
+            end)
+          (func (export "run") (param i64) (result i64)
+            local.get 0
+            call $ordinary))
     "#
 }
 
-fn ordinary_stack_args() -> &'static str {
+fn ordinary_fixed_stack_args() -> &'static str {
     r#"
         (module
-          (func $callee (param i64 i64 i64 i64 i64 i64 i64 i64 i64 i64))
-          (func (export "run") (param $count i64) (result i64)
-            (local $i i64)
+          (func $ordinary
+            (param $count i64)
+            (param i64 i64 i64 i64 i64 i64 i64 i64 i64)
+            (result i64)
             local.get $count
-            local.set $i
-            loop $loop
-              local.get $i
-              i64.const 1
-              i64.const 2
-              i64.const 3
-              i64.const 4
-              i64.const 5
-              i64.const 6
-              i64.const 7
-              i64.const 8
-              i64.const 9
-              call $callee
-              local.get $i
+            i64.eqz
+            if (result i64)
+              i64.const 42
+            else
+              local.get $count
               i64.const 1
               i64.sub
-              local.tee $i
-              i64.const 0
-              i64.ne
-              br_if $loop
-            end
-            local.get $count))
+              local.get 1
+              local.get 2
+              local.get 3
+              local.get 4
+              local.get 5
+              local.get 6
+              local.get 7
+              local.get 8
+              local.get 9
+              call $ordinary
+            end)
+          (func (export "run") (param i64) (result i64)
+            local.get 0
+            i64.const 1
+            i64.const 2
+            i64.const 3
+            i64.const 4
+            i64.const 5
+            i64.const 6
+            i64.const 7
+            i64.const 8
+            i64.const 9
+            call $ordinary))
     "#
 }
 
@@ -263,6 +320,106 @@ fn ordinary_state_machine_dispatch() -> &'static str {
               end
             end
             local.get $acc))
+    "#
+}
+
+fn ordinary_resize_direct() -> &'static str {
+    r#"
+        (module
+          (func $small (param i64 i64 i64 i64 i64) (result i64)
+            local.get 0
+            i64.eqz
+            if (result i64)
+              i64.const 42
+            else
+              local.get 0
+              i64.const 1
+              i64.sub
+              local.get 1
+              local.get 2
+              local.get 3
+              local.get 4
+              i64.const 5
+              i64.const 6
+              i64.const 7
+              i64.const 8
+              call $large
+            end)
+          (func $large (param i64 i64 i64 i64 i64 i64 i64 i64 i64) (result i64)
+            local.get 0
+            i64.eqz
+            if (result i64)
+              i64.const 42
+            else
+              local.get 0
+              i64.const 1
+              i64.sub
+              local.get 1
+              local.get 2
+              local.get 3
+              local.get 4
+              call $small
+            end)
+          (func (export "run") (param i64) (result i64)
+            local.get 0
+            i64.const 1
+            i64.const 2
+            i64.const 3
+            i64.const 4
+            call $small))
+    "#
+}
+
+fn ordinary_resize_indirect() -> &'static str {
+    r#"
+        (module
+          (type $small-ty (func (param i64 i64 i64 i64 i64) (result i64)))
+          (type $large-ty
+            (func (param i64 i64 i64 i64 i64 i64 i64 i64 i64) (result i64)))
+          (table funcref (elem $small $large))
+          (func $small (type $small-ty)
+            local.get 0
+            i64.eqz
+            if (result i64)
+              i64.const 42
+            else
+              local.get 0
+              i64.const 1
+              i64.sub
+              local.get 1
+              local.get 2
+              local.get 3
+              local.get 4
+              i64.const 5
+              i64.const 6
+              i64.const 7
+              i64.const 8
+              i32.const 1
+              call_indirect (type $large-ty)
+            end)
+          (func $large (type $large-ty)
+            local.get 0
+            i64.eqz
+            if (result i64)
+              i64.const 42
+            else
+              local.get 0
+              i64.const 1
+              i64.sub
+              local.get 1
+              local.get 2
+              local.get 3
+              local.get 4
+              i32.const 0
+              call_indirect (type $small-ty)
+            end)
+          (func (export "run") (param i64) (result i64)
+            local.get 0
+            i64.const 1
+            i64.const 2
+            i64.const 3
+            i64.const 4
+            call $small))
     "#
 }
 

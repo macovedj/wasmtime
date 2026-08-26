@@ -70,6 +70,7 @@ use crate::{
     reg::{Reg, writable},
     stack::Val,
 };
+use smallvec::SmallVec;
 use wasmtime_environ::{DefinedFuncIndex, FuncIndex, PtrSize, VMOffsets};
 
 /// All the information needed to emit a function call.
@@ -149,15 +150,31 @@ impl FnCall {
             None
         };
 
-        context.spill(masm)?;
-
         let alignment = u32::from(<M::ABI as crate::abi::ABI>::call_stack_align());
         let caller_stack_args_size = align_to(caller_stack_args_size, alignment);
         let callee_stack_args_size = align_to(sig.params_stack_size(), alignment);
 
-        // Stage the outgoing stack arguments in a non-overlapping area first.
-        masm.reserve_stack(callee_stack_args_size)?;
-        Self::assign(sig, &callee_context, ret_area.as_ref(), context, masm)?;
+        // A direct tail call whose arguments are already in non-conflicting
+        // registers can assign those registers before the context arguments.
+        // This avoids spilling the outgoing values only to reload them into
+        // their ABI registers immediately afterwards.
+        let assigned_without_spilling = matches!(kind, CalleeKind::Direct(_))
+            && callee_stack_args_size == 0
+            && Self::try_assign_direct_register_tail_args(
+                sig,
+                &callee_context,
+                ret_area.as_ref(),
+                context,
+                masm,
+            )?;
+
+        if !assigned_without_spilling {
+            context.spill(masm)?;
+
+            // Stage the outgoing stack arguments in a non-overlapping area first.
+            masm.reserve_stack(callee_stack_args_size)?;
+            Self::assign(sig, &callee_context, ret_area.as_ref(), context, masm)?;
+        }
 
         // Resizing to a non-empty argument area can overwrite the saved frame
         // state while moving arguments. Reserve two pointer slots for the
@@ -167,6 +184,72 @@ impl FnCall {
             masm.reserve_stack(u32::from(<M::ABI as crate::abi::ABI>::word_bytes()) * 2)?;
         }
         masm.tail_call(caller_stack_args_size, callee_stack_args_size, kind)
+    }
+
+    /// Try to assign a direct tail call's register arguments without first
+    /// spilling them to the shadow stack.
+    ///
+    /// This deliberately handles only the conflict-free case. If assigning
+    /// one ABI register could overwrite another argument's source register,
+    /// the general spill-based path remains the parallel-move fallback.
+    fn try_assign_direct_register_tail_args<M: MacroAssembler>(
+        sig: &ABISig,
+        callee_context: &ContextArgs,
+        ret_area: Option<&RetArea>,
+        context: &CodeGenContext<Emission>,
+        masm: &mut M,
+    ) -> Result<bool> {
+        if ret_area.is_some()
+            || !callee_context
+                .as_slice()
+                .iter()
+                .all(|loc| matches!(loc, VMContextLoc::Pinned))
+        {
+            return Ok(false);
+        }
+
+        let arg_count = sig.params.len_without_retptr();
+        debug_assert!(arg_count >= callee_context.len());
+        let values = context
+            .stack
+            .peekn(arg_count - callee_context.len())
+            .copied();
+        let mut moves = SmallVec::<[(Reg, Val); 16]>::new();
+
+        for (arg, val) in sig
+            .params_without_retptr()
+            .iter()
+            .skip(callee_context.len())
+            .zip(values)
+        {
+            match (arg, val) {
+                (&ABIOperand::Reg { reg, .. }, val @ Val::Reg(_)) => moves.push((reg, val)),
+                _ => return Ok(false),
+            }
+        }
+
+        // Assigning a destination that is still another move's source would
+        // require a parallel-move resolver. Keep using memory as the resolver
+        // for those cases.
+        for (index, (dst, _)) in moves.iter().enumerate() {
+            if moves
+                .iter()
+                .enumerate()
+                .any(|(other, (_, src))| index != other && src.unwrap_reg().reg == *dst)
+            {
+                return Ok(false);
+            }
+        }
+
+        // Move the Wasm arguments first because their current registers can
+        // overlap the context-argument destinations.
+        for (dst, val) in moves {
+            if val.unwrap_reg().reg != dst {
+                context.move_val_to_reg(&val, dst, masm)?;
+            }
+        }
+        Self::assign_context_args(sig, callee_context, masm)?;
+        Ok(true)
     }
 
     /// Calculates the return area for the callee, if any.
