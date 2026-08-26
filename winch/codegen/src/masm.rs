@@ -1426,6 +1426,17 @@ pub(crate) trait MacroAssembler {
     /// Free stack space.
     fn free_stack(&mut self, bytes: u32) -> Result<()>;
 
+    /// Restore stack space reserved for a call after the callee returns.
+    ///
+    /// This is separate from [`Self::free_stack`] because a tail callee may
+    /// return with a different stack pointer than the function that was
+    /// originally called. Architectures which can recover the expected stack
+    /// pointer from the current frame should do so here. The default remains
+    /// the normal relative stack adjustment.
+    fn restore_stack_after_call(&mut self, bytes: u32) -> Result<()> {
+        self.free_stack(bytes)
+    }
+
     /// Reset the stack pointer to the given offset;
     ///
     /// Used to reset the stack pointer to a given offset
@@ -1464,6 +1475,22 @@ pub(crate) trait MacroAssembler {
         ) -> Result<(CalleeKind, CallingConvention)>,
         finalize: impl FnMut(&mut Self, &mut CodeGenContext<Emission>) -> Result<()>,
     ) -> Result<u32>;
+
+    /// Replace the current frame with a callee frame and jump to the callee.
+    ///
+    /// The callee's stack arguments have already been staged below the current
+    /// frame. When a non-empty argument area changes size, two pointer-sized
+    /// scratch slots are reserved immediately below the staged arguments.
+    /// Implementations are responsible for preserving the caller's frame
+    /// state as needed, moving the staged arguments into their incoming
+    /// locations, restoring the caller's frame pointer, and jumping without
+    /// adding a return address.
+    fn tail_call(
+        &mut self,
+        caller_stack_args_size: u32,
+        callee_stack_args_size: u32,
+        callee: CalleeKind,
+    ) -> Result<()>;
 
     /// Record a GC stack map at the current code offset, which must be the
     /// return address of the call emitted immediately before. Each offset is

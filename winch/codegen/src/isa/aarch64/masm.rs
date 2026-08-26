@@ -314,6 +314,20 @@ impl Masm for MacroAssembler {
         Ok(())
     }
 
+    fn restore_stack_after_call(&mut self, bytes: u32) -> Result<()> {
+        if bytes == 0 {
+            // Even a zero-byte call needs this synchronization: a tail callee
+            // may have returned with real SP at a differently-sized argument
+            // area. The callee restores x28 to the caller's canonical stack
+            // position.
+            self.move_shadow_sp_to_sp();
+        } else {
+            // `free_stack` updates x28 and synchronizes real SP.
+            self.free_stack(bytes)?;
+        }
+        Ok(())
+    }
+
     fn reset_stack_pointer(&mut self, offset: SPOffset) -> Result<()> {
         self.sp_offset = offset.as_u32();
         Ok(())
@@ -440,6 +454,199 @@ impl Masm for MacroAssembler {
         finalize(self, context)?;
 
         Ok(total_stack)
+    }
+
+    fn tail_call(
+        &mut self,
+        caller_stack_args_size: u32,
+        callee_stack_args_size: u32,
+        callee: CalleeKind,
+    ) -> Result<()> {
+        let word_bytes = u32::from(<Self::ABI as ABI>::word_bytes());
+        let alignment = u32::from(<Self::ABI as ABI>::call_stack_align());
+        assert_eq!(caller_stack_args_size % alignment, 0);
+        assert_eq!(callee_stack_args_size % alignment, 0);
+
+        let caller_args = i64::from(caller_stack_args_size);
+        let callee_args = i64::from(callee_stack_args_size);
+        let args_delta = caller_args - callee_args;
+        let callee_args_offset = i64::from(<Self::ABI as ABI>::arg_base_offset()) + args_delta;
+
+        // Equal-sized argument areas cannot overwrite FP, LR, or the saved
+        // shadow stack pointer. Move the staged arguments, then use a normal
+        // pair load to restore FP and LR while positioning SP for the callee.
+        if caller_stack_args_size == callee_stack_args_size {
+            if callee_stack_args_size != 0 {
+                self.with_scratch::<IntScratch, _>(|masm, work| {
+                    let mut offset = callee_stack_args_size;
+                    while offset > 0 {
+                        offset -= word_bytes;
+                        masm.load_ptr(Address::from_shadow_sp(i64::from(offset)), work.writable())?;
+                        masm.store_ptr(
+                            work.inner(),
+                            Address::offset(regs::fp(), callee_args_offset + i64::from(offset)),
+                        )?;
+                    }
+                    wasmtime_environ::error::Ok(())
+                })?;
+            }
+
+            self.load_ptr(
+                Address::offset(regs::fp(), -i64::from(SHADOW_STACK_POINTER_SLOT_SIZE)),
+                writable!(regs::shadow_sp()),
+            )?;
+
+            let zero = Imm12::maybe_from_u64(0).unwrap();
+            self.asm
+                .add_ir(zero, regs::fp(), writable!(regs::sp()), OperandSize::S64);
+            let offset = SImm7Scaled::maybe_from_i64(16, types::I64)
+                .expect("Frame pointer offset 16 is valid for pair addressing");
+            let addr = Address::post_indexed_from_sp_for_pair(offset);
+            self.asm
+                .ldp(regs::fp(), regs::lr(), addr.to_pair_addressing_mode());
+
+            match callee {
+                CalleeKind::Indirect(reg) => self.asm.tail_jump_with_reg(reg),
+                CalleeKind::Direct(name) => self.asm.tail_jump_with_name(name),
+            }
+
+            self.sp_offset = 0;
+            return Ok(());
+        }
+
+        // A zero-sized callee has no argument move that could overwrite frame
+        // state. Restore it directly and position SP at the end of the old
+        // incoming argument area.
+        if callee_stack_args_size == 0 {
+            self.load_ptr(
+                Address::offset(regs::fp(), -i64::from(SHADOW_STACK_POINTER_SLOT_SIZE)),
+                writable!(regs::shadow_sp()),
+            )?;
+            self.load_ptr(
+                Address::offset(regs::fp(), i64::from(word_bytes)),
+                writable!(regs::lr()),
+            )?;
+
+            let entry_sp_offset = callee_args_offset.unsigned_abs();
+            if let Some(imm) = Imm12::maybe_from_u64(entry_sp_offset) {
+                debug_assert!(callee_args_offset >= 0);
+                self.asm
+                    .add_ir(imm, regs::fp(), writable!(regs::sp()), OperandSize::S64);
+            } else {
+                self.with_scratch::<IntScratch, _>(|masm, work| {
+                    masm.asm
+                        .mov_ir(work.writable(), I::I64(entry_sp_offset), OperandSize::S64);
+                    masm.asm.add_rrr(
+                        regs::fp(),
+                        work.inner(),
+                        writable!(regs::sp()),
+                        OperandSize::S64,
+                    );
+                });
+            }
+
+            self.load_ptr(Address::offset(regs::fp(), 0), writable!(regs::fp()))?;
+            match callee {
+                CalleeKind::Indirect(reg) => self.asm.tail_jump_with_reg(reg),
+                CalleeKind::Direct(name) => self.asm.tail_jump_with_name(name),
+            }
+
+            self.sp_offset = 0;
+            return Ok(());
+        }
+
+        let scratch_bytes = word_bytes * 2;
+
+        self.with_scratch::<IntScratch, _>(|masm, saved_ssp| {
+            // Preserve the original shadow SP and LR in registers before the
+            // argument move, which can overwrite their frame slots.
+            masm.load_ptr(
+                Address::offset(regs::fp(), -i64::from(SHADOW_STACK_POINTER_SLOT_SIZE)),
+                saved_ssp.writable(),
+            )?;
+            masm.load_ptr(
+                Address::offset(regs::fp(), i64::from(word_bytes)),
+                writable!(regs::lr()),
+            )?;
+
+            masm.with_scratch::<IntScratch, _>(|masm, work| {
+                // Keep the original FP in the first scratch slot below the
+                // staged argument block.
+                masm.load_ptr(Address::offset(regs::fp(), 0), work.writable())?;
+                masm.store_ptr(work.inner(), Address::from_shadow_sp(0))?;
+
+                // As on x64, the destination is above the staged source, so
+                // copy high addresses to low addresses to permit overlap.
+                let mut offset = callee_stack_args_size;
+                while offset > 0 {
+                    offset -= word_bytes;
+                    masm.load_ptr(
+                        Address::from_shadow_sp(i64::from(scratch_bytes + offset)),
+                        work.writable(),
+                    )?;
+                    masm.store_ptr(
+                        work.inner(),
+                        Address::offset(regs::fp(), callee_args_offset + i64::from(offset)),
+                    )?;
+                }
+
+                // Calculate the callee's entry SP while the current FP is
+                // still available. Do this with only `work`, because the other
+                // scratch register is preserving the caller's shadow SP.
+                let magnitude = callee_args_offset.unsigned_abs();
+                if let Some(imm) = Imm12::maybe_from_u64(magnitude) {
+                    if callee_args_offset >= 0 {
+                        masm.asm
+                            .add_ir(imm, regs::fp(), work.writable(), OperandSize::S64);
+                    } else {
+                        masm.asm
+                            .sub_ir(imm, regs::fp(), work.writable(), OperandSize::S64);
+                    }
+                } else {
+                    masm.asm
+                        .mov_ir(work.writable(), I::I64(magnitude), OperandSize::S64);
+                    if callee_args_offset >= 0 {
+                        masm.asm.add_rrr(
+                            work.inner(),
+                            regs::fp(),
+                            work.writable(),
+                            OperandSize::S64,
+                        );
+                    } else {
+                        masm.asm.sub_rrr(
+                            work.inner(),
+                            regs::fp(),
+                            work.writable(),
+                            OperandSize::S64,
+                        );
+                    }
+                }
+
+                // Restore the caller FP from the scratch slot. The tail
+                // callee's prologue will save FP, LR, and x28 into its
+                // replacement frame.
+                masm.load_ptr(Address::from_shadow_sp(0), writable!(regs::fp()))?;
+
+                let zero = Imm12::maybe_from_u64(0).unwrap();
+                masm.asm
+                    .add_ir(zero, work.inner(), writable!(regs::sp()), OperandSize::S64);
+                masm.asm.mov_rr(
+                    saved_ssp.inner(),
+                    writable!(regs::shadow_sp()),
+                    OperandSize::S64,
+                );
+
+                match callee {
+                    CalleeKind::Indirect(reg) => masm.asm.tail_jump_with_reg(reg),
+                    CalleeKind::Direct(name) => masm.asm.tail_jump_with_name(name),
+                }
+                wasmtime_environ::error::Ok(())
+            })?;
+            wasmtime_environ::error::Ok(())
+        })?;
+
+        self.sp_offset = 0;
+        Ok(())
     }
 
     fn load(&mut self, src: Address, dst: WritableReg, size: OperandSize) -> Result<()> {
