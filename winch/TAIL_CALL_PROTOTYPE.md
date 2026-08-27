@@ -54,6 +54,26 @@ The corrected ordinary fixtures were overlaid on the comparison base.
 | Resize indirect | Winch     |                 8.639 |             3.676 |                7.491 |            4.121 |
 | Resize indirect | Cranelift |                 6.764 |             2.094 |                8.074 |            2.171 |
 
+### State machine
+
+Microseconds per 100,000 transitions.
+
+Tests: `ordinary/state-machine-dispatch` and `tail/state-machine` from
+`benches/tail_calls.rs::bench_runtime`.
+
+#### Before tail-call work
+
+| Compiler | AArch64 ordinary (µs) | x86-64 ordinary (µs) |
+|----------|----------------------:|---------------------:|
+| Winch    |                246.19 |               274.35 |
+
+#### Tail-call prototype
+
+| Compiler  | AArch64 ordinary (µs) | AArch64 tail (µs) | x86-64 ordinary (µs) | x86-64 tail (µs) |
+|-----------|----------------------:|------------------:|---------------------:|-----------------:|
+| Winch     |                246.49 |            253.98 |               274.66 |           268.98 |
+| Cranelift |                109.84 |             48.87 |               117.20 |            46.09 |
+
 ## Commands
 
 ```console

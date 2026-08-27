@@ -1,9 +1,10 @@
 //! Measure the caller-clean Winch tail-call prototype.
 //!
 //! Runtime benchmarks compare ordinary and tail-recursive chains with fixed,
-//! growing, and shrinking stack-argument areas. Compilation benchmarks use
-//! generated high-arity call chains. Set `WASMTIME_TAIL_CALL_REPORT=1` to
-//! print precompiled artifact sizes instead.
+//! growing, and shrinking stack-argument areas, plus equivalent dispatch-loop
+//! and mutual-tail-call state machines. Compilation benchmarks use generated
+//! high-arity call chains. Set `WASMTIME_TAIL_CALL_REPORT=1` to print
+//! precompiled artifact sizes instead.
 
 use criterion::{BenchmarkId, Criterion, Throughput};
 use std::fmt::Write as _;
@@ -12,6 +13,7 @@ use std::time::Duration;
 use wasmtime::{Config, Engine, Module, Store, Strategy};
 
 const RECURSION_DEPTH: u64 = 1_000;
+const STATE_MACHINE_TRANSITIONS: u64 = 100_000;
 const COMPILE_FUNCTIONS: usize = 256;
 
 fn main() {
@@ -67,6 +69,12 @@ fn bench_runtime(c: &mut Criterion, ordinary_only: bool) {
                 RECURSION_DEPTH,
             ),
             (
+                "ordinary/state-machine-dispatch",
+                ordinary_state_machine_dispatch(),
+                false,
+                STATE_MACHINE_TRANSITIONS,
+            ),
+            (
                 "ordinary/resize-direct",
                 ordinary_resize_direct(),
                 false,
@@ -102,6 +110,12 @@ fn bench_runtime(c: &mut Criterion, ordinary_only: bool) {
                 true,
                 RECURSION_DEPTH,
             ),
+            (
+                "tail/state-machine",
+                tail_state_machine(),
+                true,
+                STATE_MACHINE_TRANSITIONS,
+            ),
         ];
         for (name, wat, tail_calls, iterations) in benchmarks {
             if ordinary_only && tail_calls {
@@ -115,7 +129,13 @@ fn bench_runtime(c: &mut Criterion, ordinary_only: bool) {
                 .get_typed_func::<i64, i64>(&mut store, "run")
                 .unwrap();
 
-            assert_eq!(run.call(&mut store, 4).unwrap(), 42);
+            if name.contains("state-machine") {
+                // Both fixtures implement four alternating transitions:
+                // 0 + 3 + 5 + 3 + 5.
+                assert_eq!(run.call(&mut store, 4).unwrap(), 16);
+            } else {
+                assert_eq!(run.call(&mut store, 4).unwrap(), 42);
+            }
 
             group.throughput(Throughput::Elements(iterations));
             group.bench_function(BenchmarkId::new(name, compiler), |b| {
@@ -256,6 +276,53 @@ fn ordinary_fixed_stack_args() -> &'static str {
     "#
 }
 
+fn ordinary_state_machine_dispatch() -> &'static str {
+    r#"
+        (module
+          (func $even-step (param $acc i64) (result i64)
+            local.get $acc
+            i64.const 3
+            i64.add)
+          (func $odd-step (param $acc i64) (result i64)
+            local.get $acc
+            i64.const 5
+            i64.add)
+          (func (export "run") (param $count i64) (result i64)
+            (local $remaining i64)
+            (local $state i32)
+            (local $acc i64)
+            local.get $count
+            local.set $remaining
+            block $done
+              loop $dispatch
+                local.get $remaining
+                i64.eqz
+                br_if $done
+                local.get $state
+                i32.eqz
+                if
+                  local.get $acc
+                  call $even-step
+                  local.set $acc
+                else
+                  local.get $acc
+                  call $odd-step
+                  local.set $acc
+                end
+                local.get $state
+                i32.eqz
+                local.set $state
+                local.get $remaining
+                i64.const 1
+                i64.sub
+                local.set $remaining
+                br $dispatch
+              end
+            end
+            local.get $acc))
+    "#
+}
+
 fn ordinary_resize_direct() -> &'static str {
     r#"
         (module
@@ -353,6 +420,44 @@ fn ordinary_resize_indirect() -> &'static str {
             i64.const 3
             i64.const 4
             call $small))
+    "#
+}
+
+fn tail_state_machine() -> &'static str {
+    r#"
+        (module
+          (func $even (param $remaining i64) (param $acc i64) (result i64)
+            local.get $remaining
+            i64.eqz
+            if (result i64)
+              local.get $acc
+            else
+              local.get $remaining
+              i64.const 1
+              i64.sub
+              local.get $acc
+              i64.const 3
+              i64.add
+              return_call $odd
+            end)
+          (func $odd (param $remaining i64) (param $acc i64) (result i64)
+            local.get $remaining
+            i64.eqz
+            if (result i64)
+              local.get $acc
+            else
+              local.get $remaining
+              i64.const 1
+              i64.sub
+              local.get $acc
+              i64.const 5
+              i64.add
+              return_call $even
+            end)
+          (func (export "run") (param $count i64) (result i64)
+            local.get $count
+            i64.const 0
+            return_call $even))
     "#
 }
 
