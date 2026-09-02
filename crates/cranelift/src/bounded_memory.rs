@@ -1,4 +1,35 @@
 //! Facts about checked regions of Wasm linear memory.
+//!
+//! A Wasm32 memory access normally forms its native address as
+//! `heap_base + uextend(wasm_addr)`. Because `wasm_addr` has wrapping i32
+//! semantics, an expression such as `base + (index << shift)` must ordinarily
+//! be evaluated in i32 before it is extended. This prevents AArch64 from using
+//! its native `base + uextend(index << shift)` addressing mode directly.
+//!
+//! A preceding bulk-memory bounds check gives us a stronger fact. If it checks
+//! every byte in `[base, base + len)`, then an access whose complete range is
+//! proven to lie inside that span cannot observe i32 wrapping: the bulk check
+//! established `base + len <= memory_size <= 2^32`. We can therefore retain
+//! the native pointer produced by that check and reassociate a later address:
+//!
+//! ```text
+//! heap_base + uextend(base + (index << shift)) + static_offset
+//!     => checked_native_base + (uextend(index) << shift) + static_offset
+//! ```
+//!
+//! The rewrite is deliberately conservative. It requires all of the following:
+//!
+//! * the checked pointer dominates the original address computation;
+//! * the span and access refer to the same non-moving Wasm32 memory;
+//! * unsigned range analysis proves the dynamic offset, static offset, and
+//!   access size all fit in the checked span without i32 arithmetic wrapping;
+//! * speculative execution is confined to the reserved span, either by an
+//!   existing index mask or by a mask inserted here; and
+//! * only the recorded memory instruction's address operand is changed. The
+//!   original value is retained for any other users.
+//!
+//! If any part of the proof is unavailable, the original address is left
+//! unchanged.
 
 use cranelift_codegen::cursor::{Cursor, FuncCursor};
 use cranelift_codegen::dominator_tree::DominatorTree;
@@ -109,6 +140,8 @@ impl State {
         });
     }
 
+    /// Reassociate accesses for which a complete non-wrapping and speculative-
+    /// safety proof can be constructed.
     pub(crate) fn optimize(self, func: &mut Function) -> usize {
         let cfg = ControlFlowGraph::with_function(func);
         let domtree = DominatorTree::with_function(func, &cfg);
@@ -173,6 +206,11 @@ impl State {
                     continue;
                 };
 
+                // The checked bulk-memory operation established
+                // `wasm_base + span.len <= memory_size <= 2^32`. Proving the
+                // complete access ends within `span.len` therefore proves both
+                // that the access is in bounds and that reassociating the i32
+                // addition cannot change its wrapping behavior.
                 let end = dynamic_max
                     .checked_add(u64::from(access.static_offset))
                     .and_then(|n| n.checked_add(u64::from(access.access_size)));

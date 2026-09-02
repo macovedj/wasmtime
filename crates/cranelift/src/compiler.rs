@@ -593,6 +593,9 @@ impl wasmtime_environ::Compiler for Compiler {
             &mut func_env,
         )?;
 
+        // This reassociation exposes AArch64's base-plus-extended-index
+        // addressing mode. Keep it target-specific: on x86-64 the extra live
+        // base and speculative masks can instead increase register pressure.
         if matches!(
             isa.triple().architecture,
             target_lexicon::Architecture::Aarch64(_)

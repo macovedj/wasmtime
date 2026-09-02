@@ -286,6 +286,8 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
             gc_heap: None,
 
             heaps: PrimaryMap::default(),
+            // Collection is target-specific for the same reason as the
+            // post-translation rewrite in `Compiler::compile_function`.
             bounded_memory: bounded_memory::State::new(matches!(
                 isa.triple().architecture,
                 target_lexicon::Architecture::Aarch64(_)
