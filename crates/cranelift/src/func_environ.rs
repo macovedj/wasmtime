@@ -2,6 +2,7 @@ mod gc;
 pub(crate) mod stack_switching;
 
 use crate::alias_region::AliasRegions;
+use crate::bounded_memory;
 use crate::compiler::Compiler;
 use crate::translate::{
     FuncTranslationStacks, Heap, HeapData, MemoryKind, StructFieldsVec, TableData, TableSize,
@@ -167,6 +168,10 @@ pub struct FuncEnvironment<'module_environment> {
     /// Heaps implementing WebAssembly linear memories.
     heaps: PrimaryMap<Heap, HeapData>,
 
+    /// Whole-span checks and scalar accesses used to improve Wasm32 address
+    /// formation after translation.
+    pub(crate) bounded_memory: bounded_memory::State,
+
     /// When translating a fused sync-to-sync adapter, the explicit stack slot
     /// holding the `VMDeferredThread` pushed by the inline `enter-sync-call`
     /// lowering, shared with the matching inline `exit-sync-call`. `None`
@@ -283,6 +288,7 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
             gc_heap: None,
 
             heaps: PrimaryMap::default(),
+            bounded_memory: bounded_memory::State::default(),
             fact_sync_call_slot: None,
             builtin_functions,
             offsets,
@@ -4226,11 +4232,46 @@ impl FuncEnvironment<'_> {
         len: ir::Value,
     ) -> WasmResult<ir::Value> {
         let entity = entity.into();
+        let wasm_idx = idx;
         let pointer_type = self.pointer_type();
         let idx_type = entity.index_type(self);
         let idx_clif_type = index_type_to_ir_type(idx_type);
         assert_eq!(builder.func.dfg.value_type(idx), idx_clif_type);
         assert_eq!(builder.func.dfg.value_type(len), idx_clif_type);
+
+        // A successful constant-length operation on a Wasm32 memory proves a
+        // reusable, non-wrapping span. Only retain a native base when the
+        // memory itself cannot relocate. With Spectre mitigations enabled we
+        // also require enough reservation/guard space for a masked offset to
+        // remain inside the linear-memory allocation speculatively.
+        let bounded_span = match entity {
+            CheckedEntity::Memory(memory) if idx_type == IndexType::I32 => {
+                Self::value_as_const_int(builder, len)
+                    .and_then(|len| u32::try_from(len).ok())
+                    .and_then(|len| {
+                        let memory_plan = self.module.memories[memory];
+                        let memory_tunables =
+                            MemoryTunables::new(self.tunables, MemoryKind::LinearMemory);
+                        if memory_plan.memory_may_move(&memory_tunables) {
+                            return None;
+                        }
+                        let spectre_mask = self.clif_memory_traps_enabled()
+                            && self.heap_access_spectre_mitigation();
+                        if spectre_mask {
+                            let available = memory_tunables
+                                .reservation()
+                                .checked_add(memory_tunables.guard_size())?;
+                            let required =
+                                wasmtime_environ::WASM32_MAX_SIZE.checked_add(u64::from(len))?;
+                            if available < required {
+                                return None;
+                            }
+                        }
+                        Some((memory, len, spectre_mask))
+                    })
+            }
+            _ => None,
+        };
 
         // Load the entity size, as `pointer_type`.
         let entity_size = match entity {
@@ -4374,7 +4415,12 @@ impl FuncEnvironment<'_> {
                 builder.ins().imul_imm_s(idx, i64::from(elem_size))
             }
         };
-        Ok(builder.ins().iadd(base, byte_offset))
+        let raw_addr = builder.ins().iadd(base, byte_offset);
+        if let Some((memory, len, spectre_mask)) = bounded_span {
+            self.bounded_memory
+                .record_span(memory, wasm_idx, raw_addr, len, spectre_mask);
+        }
+        Ok(raw_addr)
     }
 
     fn load_runtime_data_length(

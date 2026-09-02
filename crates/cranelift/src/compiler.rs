@@ -580,6 +580,28 @@ impl wasmtime_environ::Compiler for Compiler {
             &mut func_env,
         )?;
 
+        // AArch64 can fold a scaled, extended index directly into a memory
+        // operand. Reuse dominating whole-span checks to expose that shape
+        // when Wasm32 wrapping has been proven impossible.
+        if matches!(
+            isa.triple().architecture,
+            target_lexicon::Architecture::Aarch64(_)
+        ) {
+            // Run the two cheap CFG cleanups that the normal optimization
+            // pipeline starts with. Removing frontend-only constant phis makes
+            // the original Wasm address expressions visible to the range
+            // proof below; the regular pipeline can safely run these
+            // idempotent cleanups again later.
+            context.flowgraph();
+            context
+                .eliminate_unreachable_code(isa)
+                .and_then(|()| context.remove_constant_phis(isa))
+                .map_err(|error| CompileError::Codegen(pretty_error(&context.func, error)))?;
+            let state = mem::take(&mut func_env.bounded_memory);
+            let rewrites = state.optimize(&mut context.func);
+            log::trace!("reassociated {rewrites} bounded Wasm32 memory addresses");
+        }
+
         let needs_gc_heap = func_env.needs_gc_heap();
 
         if let Some((_, slot_builder)) = func_env.state_slot {

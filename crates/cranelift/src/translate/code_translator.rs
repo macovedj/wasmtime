@@ -3752,6 +3752,12 @@ fn prepare_addr(
         Reachability::Reachable(a) => a,
     };
 
+    if let Ok(static_offset) = u32::try_from(memarg.offset) {
+        environ
+            .bounded_memory
+            .record_access(memory_index, index, addr, static_offset, access_size);
+    }
+
     // Note that we don't set `is_aligned` here, even if the load instruction's
     // alignment immediate may says it's aligned, because WebAssembly's
     // immediate field is just a hint, while Cranelift's aligned flag needs a
