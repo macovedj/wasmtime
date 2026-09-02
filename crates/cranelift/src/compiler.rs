@@ -597,6 +597,16 @@ impl wasmtime_environ::Compiler for Compiler {
             isa.triple().architecture,
             target_lexicon::Architecture::Aarch64(_)
         ) {
+            // Remove frontend-only dead blocks and constant block parameters
+            // before asking the range analysis to follow value flow through
+            // loops. The normal optimization pipeline performs these same
+            // idempotent cleanups again later.
+            context.flowgraph();
+            context
+                .eliminate_unreachable_code(isa)
+                .and_then(|()| context.remove_constant_phis(isa))
+                .map_err(|error| CompileError::Codegen(pretty_error(&context.func, error)))?;
+
             let state = mem::take(&mut func_env.bounded_memory);
             let rewrites = state.optimize(&mut context.func);
             log::trace!("reassociated {rewrites} bounded Wasm32 memory addresses");

@@ -4,8 +4,8 @@ use cranelift_codegen::cursor::{Cursor, FuncCursor};
 use cranelift_codegen::dominator_tree::DominatorTree;
 use cranelift_codegen::flowgraph::ControlFlowGraph;
 use cranelift_codegen::ir::condcodes::{CondCode, IntCC};
-use cranelift_codegen::ir::{self, Block, Function, Inst, InstBuilder, Opcode, Value};
-use std::collections::HashSet;
+use cranelift_codegen::ir::{self, Block, BlockArg, Function, Inst, InstBuilder, Opcode, Value};
+use std::collections::{HashMap, HashSet};
 use wasmtime_environ::MemoryIndex;
 
 /// A region whose complete byte range has already been bounds-checked.
@@ -89,6 +89,7 @@ impl State {
         let domtree = DominatorTree::with_function(func, &cfg);
         let mut rewrites = Vec::new();
         let mut rewritten_insts = HashSet::new();
+        let mut ranges = RangeAnalysis::new(func, &cfg, &domtree);
 
         for access in self.accesses {
             let Some(old_addr_inst) = func.dfg.value_def(access.native_addr).inst() else {
@@ -117,26 +118,9 @@ impl State {
                     continue;
                 };
 
-                let (index_max, mask) = match band_mask(func, index) {
-                    // The source already masks the index, so no new mask is needed.
-                    Some(mask) => (mask, None),
-
-                    // Otherwise, try to obtain a bound from dominating control flow.
-                    None => {
-                        let Some(max) =
-                            dominating_unsigned_upper_bound(func, &domtree, index, access_block)
-                        else {
-                            continue;
-                        };
-
-                        // `index & max` preserves every value in 0..=max only
-                        // when max is one less than a power of two.
-                        if max & max.wrapping_add(1) != 0 {
-                            continue;
-                        }
-
-                        (max, Some(max))
-                    }
+                let index_range = ranges.range_at(index, access_block);
+                let Ok(index_max) = u32::try_from(index_range.max) else {
+                    continue;
                 };
 
                 let Some(dynamic_max) = u64::from(index_max).checked_shl(u32::from(shift)) else {
@@ -150,6 +134,26 @@ impl State {
                 if !end.is_some_and(|end| end <= u64::from(span.len)) {
                     continue;
                 }
+
+                let mask = if band_mask(func, index).is_some() {
+                    None
+                } else {
+                    // Build the speculative-safety mask from the span's
+                    // capacity, rather than requiring the proven maximum to
+                    // already be one less than a power of two.
+                    let Some(available) = span
+                        .len
+                        .checked_sub(access.static_offset)
+                        .and_then(|n| n.checked_sub(u32::from(access.access_size)))
+                    else {
+                        continue;
+                    };
+                    let index_mask = available >> shift;
+                    if index_mask & index_mask.wrapping_add(1) != 0 || index_max > index_mask {
+                        continue;
+                    }
+                    Some(index_mask)
+                };
 
                 if !rewritten_insts.insert(old_addr_inst) {
                     break;
@@ -185,6 +189,470 @@ struct Rewrite {
     /// A mask inserted for speculative safety. This is `None` when the
     /// original Wasm expression already contains the mask.
     mask: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Range {
+    min: u64,
+    max: u64,
+}
+
+impl Range {
+    const I32_FULL: Self = Self {
+        min: 0,
+        max: u32::MAX as u64,
+    };
+
+    fn intersect(self, other: Self) -> Self {
+        let min = self.min.max(other.min);
+        let max = self.max.min(other.max);
+
+        if min <= max { Self { min, max } } else { self }
+    }
+
+    fn union(self, other: Self) -> Self {
+        Self {
+            min: self.min.min(other.min),
+            max: self.max.max(other.max),
+        }
+    }
+}
+
+struct RangeAnalysis<'a> {
+    func: &'a Function,
+    cfg: &'a ControlFlowGraph,
+    domtree: &'a DominatorTree,
+    active: HashSet<(Value, Block)>,
+    cache: HashMap<(Value, Block), Range>,
+}
+
+impl<'a> RangeAnalysis<'a> {
+    fn new(func: &'a Function, cfg: &'a ControlFlowGraph, domtree: &'a DominatorTree) -> Self {
+        Self {
+            func,
+            cfg,
+            domtree,
+            active: HashSet::new(),
+            cache: HashMap::new(),
+        }
+    }
+
+    fn range_at(&mut self, value: Value, block: Block) -> Range {
+        let value = self.func.dfg.resolve_aliases(value);
+
+        if let Some(range) = self.cache.get(&(value, block)) {
+            return *range;
+        }
+
+        if !self.active.insert((value, block)) {
+            return Range::I32_FULL;
+        }
+
+        let control = self.dominating_constraint(value, block);
+        let structural = self.structural_range(value, block);
+        self.active.remove(&(value, block));
+
+        let result = control.map_or(structural, |range| structural.intersect(range));
+        self.cache.insert((value, block), result);
+        result
+    }
+
+    fn structural_range(&mut self, value: Value, block: Block) -> Range {
+        match self.func.dfg.value_def(value) {
+            ir::ValueDef::Param(param_block, index) => {
+                self.block_param_range(value, param_block, index, block)
+            }
+            ir::ValueDef::Union(_, _) => Range::I32_FULL,
+            ir::ValueDef::Result(inst, _) => {
+                let opcode = self.func.dfg.insts[inst].opcode();
+                let args = self.func.dfg.inst_args(inst);
+                match opcode {
+                    Opcode::Iconst => iconst_u32(self.func, value)
+                        .map(|n| Range {
+                            min: u64::from(n),
+                            max: u64::from(n),
+                        })
+                        .unwrap_or(Range::I32_FULL),
+                    Opcode::Uextend => self.range_at(args[0], block),
+                    Opcode::Ireduce => {
+                        let bits = self.func.dfg.value_type(value).bits();
+                        let max = (1_u64 << bits) - 1;
+                        let input = self.range_at(args[0], block);
+                        if input.max <= max {
+                            input
+                        } else {
+                            Range { min: 0, max }
+                        }
+                    }
+                    Opcode::Iadd => self.add_range(args[0], args[1], block),
+                    Opcode::Isub => self.sub_range(args[0], args[1], block),
+                    Opcode::Band => {
+                        if let Some(mask) = iconst_u32(self.func, args[0])
+                            .or_else(|| iconst_u32(self.func, args[1]))
+                        {
+                            Range {
+                                min: 0,
+                                max: u64::from(mask),
+                            }
+                        } else {
+                            Range::I32_FULL
+                        }
+                    }
+                    Opcode::Bor => {
+                        let (other, constant) = if let Some(c) = iconst_u32(self.func, args[0]) {
+                            (args[1], c)
+                        } else if let Some(c) = iconst_u32(self.func, args[1]) {
+                            (args[0], c)
+                        } else {
+                            return Range::I32_FULL;
+                        };
+                        let other = self.range_at(other, block);
+                        let envelope = if other.max == 0 {
+                            0
+                        } else {
+                            other
+                                .max
+                                .checked_add(1)
+                                .and_then(u64::checked_next_power_of_two)
+                                .map_or(u64::from(u32::MAX), |n| n - 1)
+                        };
+                        Range {
+                            min: 0,
+                            max: (envelope | u64::from(constant)).min(u64::from(u32::MAX)),
+                        }
+                    }
+                    Opcode::Ishl => {
+                        let Some(shift) = iconst_u32(self.func, args[1]) else {
+                            return Range::I32_FULL;
+                        };
+                        let shift = shift & 31;
+                        let input = self.range_at(args[0], block);
+                        if input.max <= (u64::from(u32::MAX) >> shift) {
+                            Range {
+                                min: input.min << shift,
+                                max: input.max << shift,
+                            }
+                        } else {
+                            Range::I32_FULL
+                        }
+                    }
+                    Opcode::Ushr => {
+                        let Some(shift) = iconst_u32(self.func, args[1]) else {
+                            return Range::I32_FULL;
+                        };
+                        let shift = shift & 31;
+                        let input = self.range_at(args[0], block);
+                        Range {
+                            min: input.min >> shift,
+                            max: input.max >> shift,
+                        }
+                    }
+                    Opcode::Select | Opcode::SelectSpectreGuard => {
+                        let a = self.range_at(args[args.len() - 2], block);
+                        let b = self.range_at(args[args.len() - 1], block);
+                        a.union(b)
+                    }
+                    _ => Range::I32_FULL,
+                }
+            }
+        }
+    }
+
+    fn add_range(&mut self, a: Value, b: Value, block: Block) -> Range {
+        // Cranelift represents subtraction by a constant as addition of its
+        // two's-complement value in several frontend paths.
+        if let Some(c) = iconst_u32(self.func, b)
+            && c > i32::MAX.cast_unsigned()
+        {
+            return self.sub_constant_range(a, c.wrapping_neg(), block);
+        }
+        if let Some(c) = iconst_u32(self.func, a)
+            && c > i32::MAX.cast_unsigned()
+        {
+            return self.sub_constant_range(b, c.wrapping_neg(), block);
+        }
+
+        let a = self.range_at(a, block);
+        let b = self.range_at(b, block);
+        let max = a.max.checked_add(b.max);
+        if max.is_some_and(|max| max <= u64::from(u32::MAX)) {
+            Range {
+                min: a.min + b.min,
+                max: max.unwrap(),
+            }
+        } else {
+            Range::I32_FULL
+        }
+    }
+
+    fn sub_range(&mut self, a: Value, b: Value, block: Block) -> Range {
+        if let Some(c) = iconst_u32(self.func, b) {
+            self.sub_constant_range(a, c, block)
+        } else {
+            let a = self.range_at(a, block);
+            let b = self.range_at(b, block);
+            if a.min >= b.max {
+                Range {
+                    min: a.min - b.max,
+                    max: a.max - b.min,
+                }
+            } else {
+                Range::I32_FULL
+            }
+        }
+    }
+
+    fn sub_constant_range(&mut self, value: Value, c: u32, block: Block) -> Range {
+        let value = self.range_at(value, block);
+        let c = u64::from(c);
+        if value.min >= c {
+            Range {
+                min: value.min - c,
+                max: value.max - c,
+            }
+        } else {
+            Range::I32_FULL
+        }
+    }
+
+    fn block_param_range(
+        &mut self,
+        value: Value,
+        param_block: Block,
+        index: usize,
+        _at_block: Block,
+    ) -> Range {
+        if self.func.layout.entry_block() == Some(param_block) {
+            return Range::I32_FULL;
+        }
+
+        if let Some(range) = self.decreasing_induction_range(value, param_block, index) {
+            return range;
+        }
+
+        let mut result = None;
+        for pred in self.cfg.pred_iter(param_block) {
+            for destination in self.func.dfg.insts[pred.inst]
+                .branch_destination(&self.func.dfg.jump_tables, &self.func.dfg.exception_tables)
+                .iter()
+                .filter(|call| call.block(&self.func.dfg.value_lists) == param_block)
+            {
+                let Some(BlockArg::Value(actual)) =
+                    destination.args(&self.func.dfg.value_lists).nth(index)
+                else {
+                    return Range::I32_FULL;
+                };
+                let range = self
+                    .range_at(actual, pred.block)
+                    .intersect(self.edge_constraint(actual, pred.inst, param_block));
+                result = Some(result.map_or(range, |old: Range| old.union(range)));
+            }
+        }
+        result.unwrap_or(Range::I32_FULL)
+    }
+
+    /// Prove the common `p = p - 1` loop induction without iterating once per
+    /// loop trip. Incoming non-backedge values establish the upper bound, and
+    /// each backedge must exclude the wrapping case.
+    fn decreasing_induction_range(
+        &mut self,
+        value: Value,
+        block: Block,
+        index: usize,
+    ) -> Option<Range> {
+        let mut initial = None;
+        let mut saw_backedge = false;
+        for pred in self.cfg.pred_iter(block) {
+            let mut destinations = self.func.dfg.insts[pred.inst]
+                .branch_destination(&self.func.dfg.jump_tables, &self.func.dfg.exception_tables)
+                .iter()
+                .filter(|call| call.block(&self.func.dfg.value_lists) == block);
+            let destination = destinations.next()?;
+            if destinations.next().is_some() {
+                return None;
+            }
+            let actual = destination
+                .args(&self.func.dfg.value_lists)
+                .nth(index)?
+                .as_value()?;
+
+            if self.domtree.block_dominates(block, pred.block) {
+                saw_backedge = true;
+                if !is_decrement_by_one(self.func, actual, value) {
+                    return None;
+                }
+                let edge = self.edge_constraint(actual, pred.inst, block);
+                let value_constraint = self.dominating_constraint(value, pred.block);
+                let excludes_wrap =
+                    edge.min >= 1 || value_constraint.is_some_and(|range| range.min >= 2);
+                if !excludes_wrap {
+                    return None;
+                }
+            } else {
+                let range = self.range_at(actual, pred.block);
+                initial = Some(initial.map_or(range, |old: Range| old.union(range)));
+            }
+        }
+        let initial = initial?;
+        if !saw_backedge || initial.min < 1 {
+            return None;
+        }
+        Some(Range {
+            min: 1,
+            max: initial.max,
+        })
+    }
+
+    fn dominating_constraint(&mut self, value: Value, block: Block) -> Option<Range> {
+        let mut result: Option<Range> = None;
+        for dom_block in self.func.layout.blocks() {
+            if dom_block == block || !self.domtree.block_dominates(dom_block, block) {
+                continue;
+            }
+            let Some(inst) = self.func.layout.last_inst(dom_block) else {
+                continue;
+            };
+            let ir::InstructionData::Brif {
+                arg,
+                blocks: [then_block, else_block],
+                ..
+            } = self.func.dfg.insts[inst]
+            else {
+                continue;
+            };
+            let then_dominates = self
+                .domtree
+                .block_dominates(then_block.block(&self.func.dfg.value_lists), block);
+            let else_dominates = self
+                .domtree
+                .block_dominates(else_block.block(&self.func.dfg.value_lists), block);
+            let truth = match (then_dominates, else_dominates) {
+                (true, false) => true,
+                (false, true) => false,
+                _ => continue,
+            };
+            let constraint = self.condition_constraint(value, arg, truth, dom_block);
+            result = Some(result.map_or(constraint, |old| old.intersect(constraint)));
+        }
+        result
+    }
+
+    fn edge_constraint(&mut self, value: Value, branch: Inst, destination: Block) -> Range {
+        let ir::InstructionData::Brif {
+            arg,
+            blocks: [then_block, else_block],
+            ..
+        } = self.func.dfg.insts[branch]
+        else {
+            return Range::I32_FULL;
+        };
+        let truth = match (
+            then_block.block(&self.func.dfg.value_lists) == destination,
+            else_block.block(&self.func.dfg.value_lists) == destination,
+        ) {
+            (true, false) => true,
+            (false, true) => false,
+            _ => return Range::I32_FULL,
+        };
+        let block = self.func.layout.inst_block(branch).unwrap();
+        self.condition_constraint(value, arg, truth, block)
+    }
+
+    fn condition_constraint(
+        &mut self,
+        value: Value,
+        condition: Value,
+        truth: bool,
+        block: Block,
+    ) -> Range {
+        let condition = strip_boolean_casts(self.func, condition);
+        let Some(inst) = self.func.dfg.value_def(condition).inst() else {
+            return if condition == value {
+                if truth {
+                    Range {
+                        min: 1,
+                        max: u64::from(u32::MAX),
+                    }
+                } else {
+                    Range { min: 0, max: 0 }
+                }
+            } else {
+                Range::I32_FULL
+            };
+        };
+        if self.func.dfg.insts[inst].opcode() != Opcode::Icmp {
+            return if condition == value {
+                if truth {
+                    Range {
+                        min: 1,
+                        max: u64::from(u32::MAX),
+                    }
+                } else {
+                    Range { min: 0, max: 0 }
+                }
+            } else {
+                Range::I32_FULL
+            };
+        }
+
+        let ir::InstructionData::IntCompare { cond, args, .. } = self.func.dfg.insts[inst] else {
+            unreachable!()
+        };
+        let cond = if truth { cond } else { cond.complement() };
+        if self.func.dfg.resolve_aliases(args[0]) == self.func.dfg.resolve_aliases(value) {
+            self.constraint_from_compare(cond, args[1], block)
+        } else if self.func.dfg.resolve_aliases(args[1]) == self.func.dfg.resolve_aliases(value) {
+            self.constraint_from_compare(cond.swap_args(), args[0], block)
+        } else if matches!(
+            cond,
+            IntCC::UnsignedLessThan | IntCC::UnsignedLessThanOrEqual
+        ) && expression_contains_monotonically(self.func, args[0], value)
+        {
+            self.constraint_from_compare(cond, args[1], block)
+        } else if matches!(
+            cond,
+            IntCC::UnsignedGreaterThan | IntCC::UnsignedGreaterThanOrEqual
+        ) && expression_contains_monotonically(self.func, args[1], value)
+        {
+            self.constraint_from_compare(cond.swap_args(), args[0], block)
+        } else {
+            Range::I32_FULL
+        }
+    }
+
+    fn constraint_from_compare(&mut self, cond: IntCC, other: Value, block: Block) -> Range {
+        let other = self.range_at(other, block);
+        match cond {
+            IntCC::Equal => other,
+            IntCC::NotEqual => {
+                if other.min == 0 && other.max == 0 {
+                    Range {
+                        min: 1,
+                        max: u64::from(u32::MAX),
+                    }
+                } else {
+                    Range::I32_FULL
+                }
+            }
+            IntCC::UnsignedLessThan => Range {
+                min: 0,
+                max: other.max.saturating_sub(1),
+            },
+            IntCC::UnsignedLessThanOrEqual => Range {
+                min: 0,
+                max: other.max,
+            },
+            IntCC::UnsignedGreaterThan => Range {
+                min: other.min.saturating_add(1),
+                max: u64::from(u32::MAX),
+            },
+            IntCC::UnsignedGreaterThanOrEqual => Range {
+                min: other.min,
+                max: u64::from(u32::MAX),
+            },
+            _ => Range::I32_FULL,
+        }
+    }
 }
 
 fn scaled_offset_from_base(func: &Function, addr: Value, base: Value) -> Option<(Value, u8)> {
@@ -276,80 +744,46 @@ fn strip_boolean_casts(func: &Function, mut value: Value) -> Value {
     }
 }
 
-fn dominating_unsigned_upper_bound(
-    func: &Function,
-    domtree: &DominatorTree,
-    value: Value,
-    access_block: Block,
-) -> Option<u32> {
-    let value = func.dfg.resolve_aliases(value);
-    let mut result = None;
-
-    for block in func.layout.blocks() {
-        if block == access_block || !domtree.block_dominates(block, access_block) {
-            continue;
-        }
-
-        let Some(branch) = func.layout.last_inst(block) else {
-            continue;
-        };
-
-        let ir::InstructionData::Brif {
-            arg,
-            blocks: [then_block, else_block],
-            ..
-        } = func.dfg.insts[branch]
-        else {
-            continue;
-        };
-
-        let then_dominates =
-            domtree.block_dominates(then_block.block(&func.dfg.value_lists), access_block);
-        let else_dominates =
-            domtree.block_dominates(else_block.block(&func.dfg.value_lists), access_block);
-
-        let condition_is_true = match (then_dominates, else_dominates) {
-            (true, false) => true,
-            (false, true) => false,
-            _ => continue,
-        };
-
-        let condition = strip_boolean_casts(func, arg);
-        let Some(compare) = func.dfg.value_def(condition).inst() else {
-            continue;
-        };
-
-        let ir::InstructionData::IntCompare { cond, args, .. } = func.dfg.insts[compare] else {
-            continue;
-        };
-
-        // If we reached the false successor, use the inverse comparison.
-        let cond = if condition_is_true {
-            cond
-        } else {
-            cond.complement()
-        };
-
-        let (cond, other) = if func.dfg.resolve_aliases(args[0]) == value {
-            (cond, args[1])
-        } else if func.dfg.resolve_aliases(args[1]) == value {
-            (cond.swap_args(), args[0])
-        } else {
-            continue;
-        };
-
-        let bound = match cond {
-            IntCC::UnsignedLessThan => iconst_u32(func, other).and_then(|n| n.checked_sub(1)),
-            IntCC::UnsignedLessThanOrEqual => iconst_u32(func, other),
-            _ => None,
-        };
-
-        if let Some(bound) = bound {
-            result = Some(result.map_or(bound, |old: u32| old.min(bound)));
-        }
+/// Return true only for expressions that are never less than `needle` when
+/// interpreted as an unsigned integer. This lets a bound on `x | constant`
+/// safely imply the same bound on `x`.
+fn expression_contains_monotonically(func: &Function, expression: Value, needle: Value) -> bool {
+    let expression = func.dfg.resolve_aliases(expression);
+    let needle = func.dfg.resolve_aliases(needle);
+    if expression == needle {
+        return true;
     }
+    let Some(inst) = func.dfg.value_def(expression).inst() else {
+        return false;
+    };
+    if func.dfg.insts[inst].opcode() != Opcode::Bor {
+        return false;
+    }
+    let args = func.dfg.inst_args(inst);
+    (iconst_u32(func, args[0]).is_some()
+        && expression_contains_monotonically(func, args[1], needle))
+        || (iconst_u32(func, args[1]).is_some()
+            && expression_contains_monotonically(func, args[0], needle))
+}
 
-    result
+fn is_decrement_by_one(func: &Function, value: Value, induction: Value) -> bool {
+    let value = func.dfg.resolve_aliases(value);
+    let Some(inst) = func.dfg.value_def(value).inst() else {
+        return false;
+    };
+    let args = func.dfg.inst_args(inst);
+    match func.dfg.insts[inst].opcode() {
+        Opcode::Isub => {
+            func.dfg.resolve_aliases(args[0]) == induction && iconst_u32(func, args[1]) == Some(1)
+        }
+        Opcode::Iadd => {
+            (func.dfg.resolve_aliases(args[0]) == induction
+                && iconst_u32(func, args[1]) == Some(u32::MAX))
+                || (func.dfg.resolve_aliases(args[1]) == induction
+                    && iconst_u32(func, args[0]) == Some(u32::MAX))
+        }
+        _ => false,
+    }
 }
 
 fn apply_rewrite(func: &mut Function, rewrite: Rewrite) {
