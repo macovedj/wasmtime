@@ -84,8 +84,8 @@ use crate::trap::TranslateTrap;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::immediates::Offset32;
 use cranelift_codegen::ir::{
-    self, AtomicRmwOp, ExceptionTag, InstBuilder, JumpTableData, MemFlagsData, Value, ValueLabel,
-    types::*,
+    self, AtomicRmwOp, ExceptionTag, Inst, InstBuilder, JumpTableData, MemFlagsData, Value,
+    ValueLabel, types::*,
 };
 use cranelift_codegen::packed_option::ReservedValue;
 use cranelift_frontend::{FunctionBuilder, Variable};
@@ -3752,11 +3752,6 @@ fn prepare_addr(
         Reachability::Reachable(a) => a,
     };
 
-    if let Ok(static_offset) = u32::try_from(memarg.offset) {
-        environ
-            .bounded_memory
-            .record_access(memory_index, index, addr, static_offset, access_size);
-    }
     // Note that we don't set `is_aligned` here, even if the load instruction's
     // alignment immediate may says it's aligned, because WebAssembly's
     // immediate field is just a hint, while Cranelift's aligned flag needs a
@@ -3772,6 +3767,26 @@ fn prepare_addr(
     flags.set_alias_region(Some(region));
 
     Ok(Reachability::Reachable((flags, index, addr)))
+}
+
+fn record_bounded_memory_access(
+    memarg: &MemArg,
+    access_size: u8,
+    wasm_addr: Value,
+    native_addr: Value,
+    access_inst: Inst,
+    environ: &mut FuncEnvironment<'_>,
+) {
+    if let Ok(static_offset) = u32::try_from(memarg.offset) {
+        environ.bounded_memory.record_access(
+            MemoryIndex::from_u32(memarg.memory),
+            wasm_addr,
+            native_addr,
+            access_inst,
+            static_offset,
+            access_size,
+        );
+    }
 }
 
 fn align_atomic_addr(
@@ -3841,6 +3856,7 @@ fn translate_load(
     let (load, dfg) = builder
         .ins()
         .Load(opcode, result_ty, flags, Offset32::new(0), base);
+    record_bounded_memory_access(memarg, mem_op_size, wasm_index, base, load, environ);
     environ.stacks.push1(dfg.first_result(load));
     Ok(Reachability::Reachable(()))
 }
@@ -3864,9 +3880,10 @@ fn translate_store(
     environ.before_store(builder, mem_op_size, wasm_index, memarg.offset);
 
     let flags = builder.func.dfg.mem_flags.insert(flags).unwrap();
-    builder
+    let (store, _) = builder
         .ins()
         .Store(opcode, val_ty, flags, Offset32::new(0), val, base);
+    record_bounded_memory_access(memarg, mem_op_size, wasm_index, base, store, environ);
     Ok(())
 }
 
@@ -3919,17 +3936,15 @@ fn translate_atomic_rmw(
         arg2 = builder.ins().ireduce(access_ty, arg2);
     }
 
-    let (flags, _, addr) = unwrap_or_return_unreachable_state!(
+    let access_size = u8::try_from(access_ty.bytes()).unwrap();
+    let (flags, wasm_index, addr) = unwrap_or_return_unreachable_state!(
         environ,
-        prepare_atomic_addr(
-            memarg,
-            u8::try_from(access_ty.bytes()).unwrap(),
-            builder,
-            environ,
-        )?
+        prepare_atomic_addr(memarg, access_size, builder, environ)?
     );
 
     let mut res = builder.ins().atomic_rmw(access_ty, flags, op, addr, arg2);
+    let access_inst = builder.func.dfg.value_def(res).unwrap_inst();
+    record_bounded_memory_access(memarg, access_size, wasm_index, addr, access_inst, environ);
     if access_ty != widened_ty {
         res = builder.ins().uextend(widened_ty, res);
     }
@@ -3974,16 +3989,14 @@ fn translate_atomic_cas(
         replacement = builder.ins().ireduce(access_ty, replacement);
     }
 
-    let (flags, _, addr) = unwrap_or_return_unreachable_state!(
+    let access_size = u8::try_from(access_ty.bytes()).unwrap();
+    let (flags, wasm_index, addr) = unwrap_or_return_unreachable_state!(
         environ,
-        prepare_atomic_addr(
-            memarg,
-            u8::try_from(access_ty.bytes()).unwrap(),
-            builder,
-            environ,
-        )?
+        prepare_atomic_addr(memarg, access_size, builder, environ)?
     );
     let mut res = builder.ins().atomic_cas(flags, addr, expected, replacement);
+    let access_inst = builder.func.dfg.value_def(res).unwrap_inst();
+    record_bounded_memory_access(memarg, access_size, wasm_index, addr, access_inst, environ);
     if access_ty != widened_ty {
         res = builder.ins().uextend(widened_ty, res);
     }
@@ -4015,16 +4028,14 @@ fn translate_atomic_load(
     };
     assert!(w_ty_ok && widened_ty.bytes() >= access_ty.bytes());
 
-    let (flags, _, addr) = unwrap_or_return_unreachable_state!(
+    let access_size = u8::try_from(access_ty.bytes()).unwrap();
+    let (flags, wasm_index, addr) = unwrap_or_return_unreachable_state!(
         environ,
-        prepare_atomic_addr(
-            memarg,
-            u8::try_from(access_ty.bytes()).unwrap(),
-            builder,
-            environ,
-        )?
+        prepare_atomic_addr(memarg, access_size, builder, environ)?
     );
     let mut res = builder.ins().atomic_load(access_ty, flags, addr);
+    let access_inst = builder.func.dfg.value_def(res).unwrap_inst();
+    record_bounded_memory_access(memarg, access_size, wasm_index, addr, access_inst, environ);
     if access_ty != widened_ty {
         res = builder.ins().uextend(widened_ty, res);
     }
@@ -4062,16 +4073,13 @@ fn translate_atomic_store(
         data = builder.ins().ireduce(access_ty, data);
     }
 
-    let (flags, _, addr) = unwrap_or_return_unreachable_state!(
+    let access_size = u8::try_from(access_ty.bytes()).unwrap();
+    let (flags, wasm_index, addr) = unwrap_or_return_unreachable_state!(
         environ,
-        prepare_atomic_addr(
-            memarg,
-            u8::try_from(access_ty.bytes()).unwrap(),
-            builder,
-            environ,
-        )?
+        prepare_atomic_addr(memarg, access_size, builder, environ)?
     );
-    builder.ins().atomic_store(flags, data, addr);
+    let access_inst = builder.ins().atomic_store(flags, data, addr);
+    record_bounded_memory_access(memarg, access_size, wasm_index, addr, access_inst, environ);
     Ok(())
 }
 

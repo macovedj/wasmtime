@@ -79,6 +79,7 @@
 ;;                                     v32 = iconst.i64 2
 ;;                                     v33 = ishl v31, v32  ; v32 = 2
 ;;                                     v34 = iadd.i64 v17, v33
+;; @003d                               v27 = iadd v26, v25
 ;; @003d                               v28 = load.i32 little region4 v34
 ;; @0040                               jump block1
 ;;

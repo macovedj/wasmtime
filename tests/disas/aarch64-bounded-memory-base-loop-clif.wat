@@ -89,6 +89,7 @@
 ;;                                     v36 = iconst.i64 2
 ;;                                     v37 = ishl v35, v36  ; v36 = 2
 ;;                                     v38 = iadd.i64 v17, v37
+;; @0044                               v30 = iadd v29, v28
 ;; @0044                               v31 = load.i32 little region4 v38
 ;; @0047                               v32 = iadd v23, v31
 ;; @004c                               brif v22, block2(v22, v32), block4
