@@ -38,6 +38,7 @@ mod compiled_function;
 pub use compiled_function::*;
 
 mod alias_region;
+mod bounded_memory;
 mod bounds_checks;
 mod builder;
 mod compiler;
