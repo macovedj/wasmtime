@@ -595,6 +595,7 @@ impl ABIMachineSpec for Riscv64MachineDeps {
                 callee_pop_size: 0,
                 try_call_info: None,
                 patchable: false,
+                restore_sp_from_fp: false,
             }),
         });
         insts
