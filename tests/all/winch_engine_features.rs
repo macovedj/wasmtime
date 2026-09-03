@@ -3,7 +3,7 @@ use wasmtime_test_macros::wasmtime_test;
 
 #[wasmtime_test(strategies(only(Winch)))]
 #[cfg_attr(miri, ignore)]
-fn tail_calls_preserve_caller_clean_stack(config: &mut Config) -> Result<()> {
+fn tail_calls_preserve_stack_across_argument_area_resize(config: &mut Config) -> Result<()> {
     if !cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
         return Ok(());
     }
@@ -267,7 +267,9 @@ fn tail_calls_through_component_lowering_trampoline(config: &mut Config) -> Resu
 
 #[wasmtime_test(strategies(only(Winch)))]
 #[cfg_attr(miri, ignore)]
-fn tail_call_indirect_preserves_caller_clean_stack(config: &mut Config) -> Result<()> {
+fn tail_call_indirect_preserves_stack_across_argument_area_resize(
+    config: &mut Config,
+) -> Result<()> {
     if !cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
         return Ok(());
     }

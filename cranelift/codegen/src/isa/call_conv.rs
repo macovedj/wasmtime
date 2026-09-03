@@ -39,9 +39,9 @@ pub enum CallConv {
     Probestack,
     /// The winch calling convention, not ABI-stable.
     ///
-    /// The main difference to SystemV is that the winch calling convention
-    /// defines no callee-save registers, and restricts the number of return
-    /// registers to one integer, and one floating point.
+    /// The main differences from SystemV are that Winch callees pop their stack
+    /// arguments, most registers are caller-saved, and the number of return
+    /// registers is restricted to one integer and one floating point register.
     Winch,
     /// Calling convention optimized for callsite efficiency, at the
     /// cost of the callee. It does so by not clobbering any

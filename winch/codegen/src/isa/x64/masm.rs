@@ -218,23 +218,12 @@ impl Masm for MacroAssembler {
         Ok(())
     }
 
-    fn restore_stack_after_call(&mut self, bytes: u32) -> Result<()> {
-        let expected = self
-            .sp_offset
-            .checked_sub(bytes)
+    fn restore_stack_after_call(&mut self, reserved_size: u32, callee_pop_size: u32) -> Result<()> {
+        let caller_pop_size = reserved_size
+            .checked_sub(callee_pop_size)
             .ok_or_else(|| CodeGenError::invalid_sp_offset())?;
-        let expected = i32::try_from(expected)?;
-
-        // A tail callee can have a differently-sized incoming argument area
-        // than the function that was originally called. Recover the stack
-        // pointer from this frame rather than adjusting the value returned by
-        // the callee.
-        self.asm.lea(
-            &Address::offset_i32(rbp(), -expected),
-            writable!(rsp()),
-            OperandSize::S64,
-        );
-        self.decrement_sp(bytes);
+        self.decrement_sp(callee_pop_size);
+        self.free_stack(caller_pop_size)?;
         Ok(())
     }
 
@@ -1059,10 +1048,10 @@ impl Masm for MacroAssembler {
         Ok(())
     }
 
-    fn frame_restore(&mut self) -> Result<()> {
+    fn frame_restore(&mut self, stack_args_size: u32) -> Result<()> {
         debug_assert_eq!(self.sp_offset, 0);
         self.asm.pop_r(writable!(rbp()));
-        self.asm.ret();
+        self.asm.ret(u16::try_from(stack_args_size)?);
         Ok(())
     }
 

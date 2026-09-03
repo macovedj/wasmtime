@@ -379,9 +379,13 @@ impl Assembler {
         self.emit(Inst::External { inst });
     }
 
-    /// Return instruction.
-    pub fn ret(&mut self) {
-        let inst = asm::inst::retq_zo::new().into();
+    /// Return and pop the given number of stack-argument bytes.
+    pub fn ret(&mut self, stack_args_size: u16) {
+        let inst = if stack_args_size == 0 {
+            asm::inst::retq_zo::new().into()
+        } else {
+            asm::inst::retq_i::new(stack_args_size).into()
+        };
         self.emit(Inst::External { inst });
     }
 

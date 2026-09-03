@@ -1410,14 +1410,14 @@ pub(crate) trait MacroAssembler {
     fn frame_setup(&mut self) -> Result<()>;
 
     /// Generate the frame restore sequence.
-    fn frame_restore(&mut self) -> Result<()>;
+    fn frame_restore(&mut self, stack_args_size: u32) -> Result<()>;
 
     /// Emit a stack check.
     fn check_stack(&mut self, vmctx: Reg) -> Result<()>;
 
     /// Emit the function epilogue.
-    fn epilogue(&mut self) -> Result<()> {
-        self.frame_restore()
+    fn epilogue(&mut self, stack_args_size: u32) -> Result<()> {
+        self.frame_restore(stack_args_size)
     }
 
     /// Reserve stack space.
@@ -1428,14 +1428,10 @@ pub(crate) trait MacroAssembler {
 
     /// Restore stack space reserved for a call after the callee returns.
     ///
-    /// This is separate from [`Self::free_stack`] because a tail callee may
-    /// return with a different stack pointer than the function that was
-    /// originally called. Architectures which can recover the expected stack
-    /// pointer from the current frame should do so here. The default remains
-    /// the normal relative stack adjustment.
-    fn restore_stack_after_call(&mut self, bytes: u32) -> Result<()> {
-        self.free_stack(bytes)
-    }
+    /// `callee_pop_size` bytes have already been removed by a default-ABI
+    /// callee. The implementation must update its abstract stack accounting
+    /// for those bytes and physically free only the remaining alignment space.
+    fn restore_stack_after_call(&mut self, reserved_size: u32, callee_pop_size: u32) -> Result<()>;
 
     /// Reset the stack pointer to the given offset;
     ///

@@ -219,7 +219,7 @@ impl Masm for MacroAssembler {
         })
     }
 
-    fn frame_restore(&mut self) -> Result<()> {
+    fn frame_restore(&mut self, stack_args_size: u32) -> Result<()> {
         debug_assert_eq!(self.sp_offset, 0);
 
         // Sync the real stack pointer with the value of the shadow stack
@@ -250,6 +250,15 @@ impl Masm for MacroAssembler {
         let addr = Address::post_indexed_from_sp_for_pair(offset);
 
         self.asm.ldp(fp, lr, addr.to_pair_addressing_mode());
+
+        if stack_args_size > 0 {
+            self.add_ir(
+                writable!(regs::sp()),
+                regs::sp(),
+                I::I64(stack_args_size.into()),
+                OperandSize::S64,
+            )?;
+        }
         self.asm.ret();
         Ok(())
     }
@@ -316,17 +325,18 @@ impl Masm for MacroAssembler {
         Ok(())
     }
 
-    fn restore_stack_after_call(&mut self, bytes: u32) -> Result<()> {
-        if bytes == 0 {
-            // Even a zero-byte call needs this synchronization: a tail callee
-            // may have returned with real SP at a differently-sized argument
-            // area. The callee restores x28 to the caller's canonical stack
-            // position.
-            self.move_shadow_sp_to_sp();
-        } else {
-            // `free_stack` updates x28 and synchronizes real SP.
-            self.free_stack(bytes)?;
+    fn restore_stack_after_call(&mut self, reserved_size: u32, callee_pop_size: u32) -> Result<()> {
+        let caller_pop_size = reserved_size
+            .checked_sub(callee_pop_size)
+            .ok_or_else(|| CodeGenError::invalid_sp_offset())?;
+        if callee_pop_size > 0 {
+            self.decrement_sp(callee_pop_size);
+            // The architectural SP reflects the callee's pop, while the
+            // callee-saved shadow SP does not. Synchronize them before freeing
+            // the caller-owned alignment space.
+            self.move_sp_to_shadow_sp();
         }
+        self.free_stack(caller_pop_size)?;
         Ok(())
     }
 
