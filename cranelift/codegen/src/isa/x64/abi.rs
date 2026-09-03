@@ -535,6 +535,16 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         smallvec![inst]
     }
 
+    fn gen_sp_reg_restore_from_fp(fp_to_sp: u32) -> SmallInstVec<Self::I> {
+        let fp_to_sp =
+            i32::try_from(fp_to_sp).expect("frame size is too large to fit in a 32-bit immediate");
+        let rsp = Writable::from_reg(regs::rsp()).map(Gpr::unwrap_new);
+        let addr = Amode::imm_reg(-fp_to_sp, regs::rbp());
+        smallvec![Inst::External {
+            inst: asm::inst::leaq_rm::new(rsp, addr).into(),
+        }]
+    }
+
     fn gen_prologue_frame_setup(
         _call_conv: isa::CallConv,
         flags: &settings::Flags,
@@ -831,32 +841,23 @@ impl ABIMachineSpec for X64ABIMachineSpec {
             offset: 0,
             distance: RelocDistance::Far,
         });
-        let callee_pop_size = 0;
-        insts.push(Inst::call_unknown(Box::new(CallInfo {
-            dest: RegMem::reg(temp2.to_reg()),
-            uses: smallvec![
-                CallArgPair {
-                    vreg: dst,
-                    preg: arg0
-                },
-                CallArgPair {
-                    vreg: src,
-                    preg: arg1
-                },
-                CallArgPair {
-                    vreg: temp.to_reg(),
-                    preg: arg2
-                },
-            ],
-            defs: smallvec![],
-            clobbers: Self::get_regs_clobbered_by_call(call_conv, false),
-            callee_pop_size,
-            callee_conv: call_conv,
-            caller_conv: call_conv,
-            try_call_info: None,
-            patchable: false,
-            restore_sp_from_fp: false,
-        })));
+        let mut info = CallInfo::empty(RegMem::reg(temp2.to_reg()), call_conv);
+        info.uses = smallvec![
+            CallArgPair {
+                vreg: dst,
+                preg: arg0
+            },
+            CallArgPair {
+                vreg: src,
+                preg: arg1
+            },
+            CallArgPair {
+                vreg: temp.to_reg(),
+                preg: arg2
+            },
+        ];
+        info.clobbers = Self::get_regs_clobbered_by_call(call_conv, false);
+        insts.push(Inst::call_unknown(Box::new(info)));
         insts
     }
 

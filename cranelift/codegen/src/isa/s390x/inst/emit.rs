@@ -3502,13 +3502,14 @@ impl Inst {
                     sink.add_call_site();
                 }
 
-                state.nominal_sp_offset -= info.callee_pop_size;
+                let callee_pop_size = info.callee_pop_size();
+                state.nominal_sp_offset -= callee_pop_size;
                 assert_eq!(state.nominal_sp_offset, 0);
 
                 if info.patchable {
                     sink.add_patchable_call_site(sink.cur_offset() - start);
                 } else {
-                    state.outgoing_sp_offset = info.callee_pop_size;
+                    state.outgoing_sp_offset = callee_pop_size;
                     for inst in S390xMachineDeps::gen_retval_loads(info) {
                         inst.emit(sink, emit_info, state);
                     }

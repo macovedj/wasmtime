@@ -3338,7 +3338,8 @@ impl Inst {
                     CallInstDest::Direct { name } => ("brasl", name.display(None).to_string()),
                     CallInstDest::Indirect { reg } => ("basr", pretty_print_reg(*reg)),
                 };
-                state.outgoing_sp_offset = info.callee_pop_size;
+                let callee_pop_size = info.callee_pop_size();
+                state.outgoing_sp_offset = callee_pop_size;
                 let mut retval_loads = S390xMachineDeps::gen_retval_loads(info)
                     .into_iter()
                     .map(|inst| inst.print_with_state(state))
@@ -3357,8 +3358,8 @@ impl Inst {
                 } else {
                     "".to_string()
                 };
-                let callee_pop_size = if info.callee_pop_size > 0 {
-                    format!(" ; callee_pop_size {}", info.callee_pop_size)
+                let callee_pop_size = if callee_pop_size > 0 {
+                    format!(" ; callee_pop_size {callee_pop_size}")
                 } else {
                     "".to_string()
                 };

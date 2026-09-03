@@ -481,6 +481,16 @@ pub trait ABIMachineSpec {
     /// Adjust the stack pointer up or down.
     fn gen_sp_reg_adjust(amount: i32) -> SmallInstVec<Self::I>;
 
+    /// Restore the stack pointer to its canonical active-frame position using
+    /// the frame pointer as the stable reference.
+    ///
+    /// This is only required for calling conventions whose callees may return
+    /// with the stack pointer at a non-canonical position. Backends which
+    /// support such a calling convention must override this method.
+    fn gen_sp_reg_restore_from_fp(_fp_to_sp: u32) -> SmallInstVec<Self::I> {
+        panic!("this backend does not support restoring SP from FP after a call")
+    }
+
     /// Compute a FrameLayout structure containing a sorted list of all clobbered
     /// registers that are callee-saved according to the ABI, as well as the sizes
     /// of all parts of the stack frame.  The result is used to emit the prologue
@@ -617,6 +627,19 @@ pub trait ABIMachineSpec {
     }
 }
 
+/// How instruction emission restores the caller's canonical stack position
+/// after a call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PostCallStackAdjustment {
+    /// The callee returns with SP in its canonical position.
+    None,
+    /// The callee popped this many bytes, which the caller must reclaim.
+    CalleePop(u32),
+    /// The callee may return with an unknown stack-argument-area size, so SP
+    /// must be recovered from the caller's FP.
+    RestoreFromFramePointer,
+}
+
 /// Out-of-line data for calls, to keep the size of `Inst` down.
 #[derive(Clone, Debug)]
 pub struct CallInfo<T> {
@@ -632,10 +655,8 @@ pub struct CallInfo<T> {
     pub callee_conv: isa::CallConv,
     /// The calling convention of the caller.
     pub caller_conv: isa::CallConv,
-    /// The number of bytes that the callee will pop from the stack for the
-    /// caller, if any. (Used for popping stack arguments with the `tail`
-    /// calling convention.)
-    pub callee_pop_size: u32,
+    /// How to restore the caller's canonical stack position after the call.
+    post_call_stack_adjustment: PostCallStackAdjustment,
     /// Information for a try-call, if this is one. We combine
     /// handling of calls and try-calls as much as possible to share
     /// argument/return logic; they mostly differ in the metadata that
@@ -643,13 +664,6 @@ pub struct CallInfo<T> {
     pub try_call_info: Option<TryCallInfo>,
     /// Whether this call is patchable.
     pub patchable: bool,
-    /// Whether instruction emission must restore SP from FP after this call.
-    ///
-    /// This is used by Cranelift-generated callers of conventions, such as
-    /// Winch, whose callees may tail-call a function with a differently-sized
-    /// incoming argument area. Hand-written callers which restore SP
-    /// themselves leave this as `false`.
-    pub restore_sp_from_fp: bool,
 }
 
 /// Out-of-line information present on `try_call` instructions only:
@@ -687,10 +701,17 @@ impl<T> CallInfo<T> {
             clobbers: PRegSet::empty(),
             caller_conv: call_conv,
             callee_conv: call_conv,
-            callee_pop_size: 0,
+            post_call_stack_adjustment: PostCallStackAdjustment::None,
             try_call_info: None,
             patchable: false,
-            restore_sp_from_fp: false,
+        }
+    }
+
+    /// The fixed number of bytes popped by the callee, if any.
+    pub(crate) fn callee_pop_size(&self) -> u32 {
+        match self.post_call_stack_adjustment {
+            PostCallStackAdjustment::CalleePop(size) => size,
+            PostCallStackAdjustment::None | PostCallStackAdjustment::RestoreFromFramePointer => 0,
         }
     }
 }
@@ -2145,11 +2166,15 @@ impl<M: ABIMachineSpec> Callee<M> {
         // after the register allocator has run and thus cannot have register allocator-inserted
         // references to SP offsets.)
 
-        let callee_pop_size = if callee_conv == isa::CallConv::Tail {
+        let post_call_stack_adjustment = match callee_conv {
             // The tail calling convention has callees pop stack arguments.
-            stack_arg_space
-        } else {
-            0
+            isa::CallConv::Tail => PostCallStackAdjustment::CalleePop(stack_arg_space),
+            // A Winch tail-call chain may return with a differently-sized
+            // incoming argument area. Cranelift-generated callers recover
+            // their canonical active-frame position from FP. Hand-written
+            // Winch callers use `CallInfo::empty` and restore SP themselves.
+            isa::CallConv::Winch => PostCallStackAdjustment::RestoreFromFramePointer,
+            _ => PostCallStackAdjustment::None,
         };
 
         CallInfo {
@@ -2159,10 +2184,9 @@ impl<M: ABIMachineSpec> Callee<M> {
             clobbers,
             callee_conv,
             caller_conv,
-            callee_pop_size,
+            post_call_stack_adjustment,
             try_call_info,
             patchable,
-            restore_sp_from_fp: callee_conv == isa::CallConv::Winch,
         }
     }
 
@@ -2503,6 +2527,33 @@ pub type CallArgList = SmallVec<[CallArgPair; 8]>;
 pub type CallRetList = SmallVec<[CallRetPair; 8]>;
 
 impl<T> CallInfo<T> {
+    /// Generate the instructions which restore the caller's canonical stack
+    /// position after this call.
+    ///
+    /// The policy is selected during common call lowering. Machine backends
+    /// provide only the instruction sequence needed to restore SP from FP.
+    pub(crate) fn gen_post_call_stack_adjustment<M: ABIMachineSpec>(
+        &self,
+        frame_layout: &FrameLayout,
+    ) -> SmallInstVec<M::I> {
+        match self.post_call_stack_adjustment {
+            PostCallStackAdjustment::None => SmallVec::new(),
+            PostCallStackAdjustment::CalleePop(0) => SmallVec::new(),
+            PostCallStackAdjustment::CalleePop(size) => {
+                let size = i32::try_from(size)
+                    .expect("callee popped more than the supported stack-frame size");
+                M::gen_sp_reg_adjust(-size)
+            }
+            PostCallStackAdjustment::RestoreFromFramePointer => {
+                assert!(
+                    frame_layout.setup_area_size > 0,
+                    "restoring SP from FP after a call requires a frame pointer"
+                );
+                M::gen_sp_reg_restore_from_fp(frame_layout.sp_to_fp())
+            }
+        }
+    }
+
     /// Emit loads for any stack-carried return values using the call
     /// info and allocations.
     pub fn emit_retval_loads<

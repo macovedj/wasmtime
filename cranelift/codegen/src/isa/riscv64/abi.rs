@@ -571,32 +571,24 @@ impl ABIMachineSpec for Riscv64MachineDeps {
         let arg2 = Writable::from_reg(x_reg(12));
         let tmp = alloc_tmp(Self::word_type());
         insts.extend(Inst::load_constant_u64(tmp, size as u64));
+        let mut info = CallInfo::empty(ExternalName::LibCall(LibCall::Memcpy), call_conv);
+        info.uses = smallvec![
+            CallArgPair {
+                vreg: dst,
+                preg: arg0.to_reg()
+            },
+            CallArgPair {
+                vreg: src,
+                preg: arg1.to_reg()
+            },
+            CallArgPair {
+                vreg: tmp.to_reg(),
+                preg: arg2.to_reg()
+            }
+        ];
+        info.clobbers = Self::get_regs_clobbered_by_call(call_conv, false);
         insts.push(Inst::Call {
-            info: Box::new(CallInfo {
-                dest: ExternalName::LibCall(LibCall::Memcpy),
-                uses: smallvec![
-                    CallArgPair {
-                        vreg: dst,
-                        preg: arg0.to_reg()
-                    },
-                    CallArgPair {
-                        vreg: src,
-                        preg: arg1.to_reg()
-                    },
-                    CallArgPair {
-                        vreg: tmp.to_reg(),
-                        preg: arg2.to_reg()
-                    }
-                ],
-                defs: smallvec![],
-                clobbers: Self::get_regs_clobbered_by_call(call_conv, false),
-                caller_conv: call_conv,
-                callee_conv: call_conv,
-                callee_pop_size: 0,
-                try_call_info: None,
-                patchable: false,
-                restore_sp_from_fp: false,
-            }),
+            info: Box::new(info),
         });
         insts
     }

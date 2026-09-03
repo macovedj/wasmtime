@@ -205,8 +205,9 @@ fn pulley_emit<P>(
             if info.patchable {
                 sink.add_patchable_call_site(sink.cur_offset() - start);
             } else {
-                let adjust = -i32::try_from(info.callee_pop_size).unwrap();
-                for i in PulleyMachineDeps::<P>::gen_sp_reg_adjust(adjust) {
+                for i in
+                    info.gen_post_call_stack_adjustment::<PulleyMachineDeps<P>>(&state.frame_layout)
+                {
                     i.emit(sink, emit_info, state);
                 }
 
@@ -249,8 +250,9 @@ fn pulley_emit<P>(
                 sink.add_call_site();
             }
 
-            let adjust = -i32::try_from(info.callee_pop_size).unwrap();
-            for i in PulleyMachineDeps::<P>::gen_sp_reg_adjust(adjust) {
+            for i in
+                info.gen_post_call_stack_adjustment::<PulleyMachineDeps<P>>(&state.frame_layout)
+            {
                 i.emit(sink, emit_info, state);
             }
 
@@ -320,7 +322,7 @@ fn pulley_emit<P>(
 
             // If a callee pop is happening here that means that something has
             // messed up, these are expected to be "very simple" signatures.
-            assert!(info.callee_pop_size == 0);
+            assert!(info.callee_pop_size() == 0);
         }
 
         Inst::Jump { label } => {

@@ -1215,11 +1215,10 @@ impl Inst {
                     sink.add_call_site();
                 }
 
-                let callee_pop_size = i32::try_from(info.callee_pop_size).unwrap();
-                if callee_pop_size > 0 {
-                    for inst in Riscv64MachineDeps::gen_sp_reg_adjust(-callee_pop_size) {
-                        inst.emit(sink, emit_info, state);
-                    }
+                for inst in
+                    info.gen_post_call_stack_adjustment::<Riscv64MachineDeps>(&state.frame_layout)
+                {
+                    inst.emit(sink, emit_info, state);
                 }
 
                 if info.patchable {
@@ -1266,11 +1265,10 @@ impl Inst {
                     sink.add_call_site();
                 }
 
-                let callee_pop_size = i32::try_from(info.callee_pop_size).unwrap();
-                if callee_pop_size > 0 {
-                    for inst in Riscv64MachineDeps::gen_sp_reg_adjust(-callee_pop_size) {
-                        inst.emit(sink, emit_info, state);
-                    }
+                for inst in
+                    info.gen_post_call_stack_adjustment::<Riscv64MachineDeps>(&state.frame_layout)
+                {
+                    inst.emit(sink, emit_info, state);
                 }
 
                 // Load any stack-carried return values.
