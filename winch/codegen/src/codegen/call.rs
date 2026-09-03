@@ -60,7 +60,7 @@
 
 use crate::{
     FuncEnv, Result,
-    abi::{self, ABIOperand, ABISig, RetArea, vmctx},
+    abi::{self, ABI, ABIOperand, ABISig, RetArea, vmctx},
     codegen::{BuiltinFunction, BuiltinType, Callee, CodeGenContext, CodeGenError, Emission},
     ensure,
     masm::{
@@ -166,10 +166,10 @@ impl FnCall {
 
     /// Emit a tail call which replaces the current frame.
     ///
-    /// This is an experimental caller-clean implementation. Stack arguments
-    /// are first staged below the current frame, then the macro assembler
-    /// slides the caller's return address and argument block into the callee's
-    /// incoming layout before jumping.
+    /// Stack arguments are first staged below the current frame, then the macro
+    /// assembler slides the caller's return address and argument block into the
+    /// callee's incoming layout before jumping. The final callee pops its own
+    /// incoming argument area when returning from the tail-call chain.
     pub fn emit_return<M: MacroAssembler>(
         env: &mut FuncEnv<M::Ptr>,
         masm: &mut M,
@@ -534,9 +534,18 @@ impl FnCall {
                 _ => {}
             }
         }
-        // Deallocate the reserved space for stack arguments and for alignment,
-        // which was allocated last.
-        masm.restore_stack_after_call(reserved_space)?;
+        // Default-ABI callees pop their aligned stack-argument area. Update the
+        // abstract stack depth for that pop and deallocate only the remaining
+        // call-alignment space. Other calling conventions remain caller-pop.
+        let callee_pop_size = if sig.call_conv.is_default() {
+            abi::align_to(
+                sig.params_stack_size(),
+                u32::from(M::ABI::call_stack_align()),
+            )
+        } else {
+            0
+        };
+        masm.restore_stack_after_call(reserved_space, callee_pop_size)?;
 
         ensure!(
             sig.params.len_without_retptr() >= callee_context.len(),

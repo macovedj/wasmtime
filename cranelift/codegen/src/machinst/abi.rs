@@ -643,13 +643,6 @@ pub struct CallInfo<T> {
     pub try_call_info: Option<TryCallInfo>,
     /// Whether this call is patchable.
     pub patchable: bool,
-    /// Whether instruction emission must restore SP from FP after this call.
-    ///
-    /// This is used by Cranelift-generated callers of conventions, such as
-    /// Winch, whose callees may tail-call a function with a differently-sized
-    /// incoming argument area. Hand-written callers which restore SP
-    /// themselves leave this as `false`.
-    pub restore_sp_from_fp: bool,
 }
 
 /// Out-of-line information present on `try_call` instructions only:
@@ -690,7 +683,6 @@ impl<T> CallInfo<T> {
             callee_pop_size: 0,
             try_call_info: None,
             patchable: false,
-            restore_sp_from_fp: false,
         }
     }
 }
@@ -2145,8 +2137,9 @@ impl<M: ABIMachineSpec> Callee<M> {
         // after the register allocator has run and thus cannot have register allocator-inserted
         // references to SP offsets.)
 
-        let callee_pop_size = if callee_conv == isa::CallConv::Tail {
-            // The tail calling convention has callees pop stack arguments.
+        let callee_pop_size = if matches!(callee_conv, isa::CallConv::Tail | isa::CallConv::Winch) {
+            // The tail and Winch calling conventions have callees pop stack
+            // arguments.
             stack_arg_space
         } else {
             0
@@ -2162,7 +2155,6 @@ impl<M: ABIMachineSpec> Callee<M> {
             callee_pop_size,
             try_call_info,
             patchable,
-            restore_sp_from_fp: callee_conv == isa::CallConv::Winch,
         }
     }
 
