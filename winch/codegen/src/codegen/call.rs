@@ -60,7 +60,7 @@
 
 use crate::{
     FuncEnv, Result,
-    abi::{ABIOperand, ABISig, RetArea, align_to, vmctx},
+    abi::{self, ABIOperand, ABISig, RetArea, vmctx},
     codegen::{BuiltinFunction, BuiltinType, Callee, CodeGenContext, CodeGenError, Emission},
     ensure,
     masm::{
@@ -71,6 +71,46 @@ use crate::{
     stack::Val,
 };
 use wasmtime_environ::{DefinedFuncIndex, FuncIndex, PtrSize, VMOffsets};
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum TailCallFrameKind {
+    SameSize,
+    EmptyCallee,
+    Resize,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct TailCallPlan {
+    pub(crate) callee_args_size: u32,
+    pub(crate) args_delta: i64,
+    pub(crate) callee_args_from_fp: i64,
+    pub(crate) frame_kind: TailCallFrameKind,
+}
+
+impl TailCallPlan {
+    pub(crate) fn new<A: abi::ABI>(caller_args_size: u32, callee_args_size: u32) -> Self {
+        let alignment = u32::from(A::call_stack_align());
+        let caller_args_size = abi::align_to(caller_args_size, alignment);
+        let callee_args_size = abi::align_to(callee_args_size, alignment);
+        let args_delta = i64::from(caller_args_size) - i64::from(callee_args_size);
+        let callee_args_from_fp = i64::from(A::arg_base_offset()) + args_delta;
+
+        let frame_kind = if caller_args_size == callee_args_size {
+            TailCallFrameKind::SameSize
+        } else if callee_args_size == 0 {
+            TailCallFrameKind::EmptyCallee
+        } else {
+            TailCallFrameKind::Resize
+        };
+
+        Self {
+            callee_args_size,
+            args_delta,
+            callee_args_from_fp,
+            frame_kind,
+        }
+    }
+}
 
 /// All the information needed to emit a function call.
 #[derive(Copy, Clone)]
@@ -151,22 +191,53 @@ impl FnCall {
 
         context.spill(masm)?;
 
-        let alignment = u32::from(<M::ABI as crate::abi::ABI>::call_stack_align());
-        let caller_stack_args_size = align_to(caller_stack_args_size, alignment);
-        let callee_stack_args_size = align_to(sig.params_stack_size(), alignment);
+        let plan = TailCallPlan::new::<M::ABI>(caller_stack_args_size, sig.params_stack_size());
 
-        // Stage the outgoing stack arguments in a non-overlapping area first.
-        masm.reserve_stack(callee_stack_args_size)?;
+        // Stage the callee arguments first.
+        masm.reserve_stack(plan.callee_args_size)?;
         Self::assign(sig, &callee_context, ret_area.as_ref(), context, masm)?;
 
-        // Resizing to a non-empty argument area can overwrite the saved frame
-        // state while moving arguments. Reserve two pointer slots for the
-        // macro assembler to preserve that state. Equal-sized areas cannot
-        // overwrite it, and a zero-sized callee has no arguments to move.
-        if callee_stack_args_size != 0 && caller_stack_args_size != callee_stack_args_size {
-            masm.reserve_stack(u32::from(<M::ABI as crate::abi::ABI>::word_bytes()) * 2)?;
+        match plan.frame_kind {
+            TailCallFrameKind::SameSize => {
+                Self::move_tail_call_args(masm, plan, 0)?;
+                masm.finish_tail_call_same_size()?;
+            }
+            TailCallFrameKind::EmptyCallee => {
+                masm.finish_tail_call_empty(plan)?;
+            }
+            TailCallFrameKind::Resize => {
+                masm.with_tail_call_resize(plan, |masm, staged_args_offset| {
+                    Self::move_tail_call_args(masm, plan, staged_args_offset)
+                })?;
+            }
         }
-        masm.tail_call(caller_stack_args_size, callee_stack_args_size, kind)
+
+        masm.reset_stack_pointer(SPOffset::from_u32(0))?;
+        masm.tail_jump(kind);
+        Ok(())
+    }
+
+    /// Move staged stack arguments into the tail callee's incoming argument
+    /// area. The destination is above the source, so copy from high addresses
+    /// to low addresses to permit overlap.
+    fn move_tail_call_args<M: MacroAssembler>(
+        masm: &mut M,
+        plan: TailCallPlan,
+        staged_args_offset: u32,
+    ) -> Result<()> {
+        let word_bytes = u32::from(<M::ABI as abi::ABI>::word_bytes());
+
+        masm.with_scratch::<IntScratch, _>(|masm, scratch| {
+            let mut offset = plan.callee_args_size;
+            while offset > 0 {
+                offset -= word_bytes;
+                let src = masm.address_at_sp(SPOffset::from_u32(staged_args_offset + offset))?;
+                let dst = masm.address_at_fp(plan.callee_args_from_fp + i64::from(offset))?;
+                masm.load_ptr(src, scratch.writable())?;
+                masm.store_ptr(scratch.inner(), dst)?;
+            }
+            wasmtime_environ::error::Ok(())
+        })
     }
 
     /// Calculates the return area for the callee, if any.

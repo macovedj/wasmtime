@@ -1,6 +1,6 @@
 use crate::Result;
 use crate::abi::{self, LocalSlot, align_to};
-use crate::codegen::{CodeGenContext, Emission, FuncEnv};
+use crate::codegen::{CodeGenContext, Emission, FuncEnv, TailCallPlan};
 use crate::isa::{
     CallingConvention,
     reg::{Reg, RegClass, WritableReg, writable},
@@ -1464,6 +1464,9 @@ pub(crate) trait MacroAssembler {
     /// of the given register.
     fn address_at_reg(&self, reg: Reg, offset: u32) -> Result<Self::Address>;
 
+    /// Construct an address relative to the frame pointer.
+    fn address_at_fp(&self, offset: i64) -> Result<Self::Address>;
+
     /// Emit a function call to either a local or external function.
     fn call(
         &mut self,
@@ -1476,21 +1479,27 @@ pub(crate) trait MacroAssembler {
         finalize: impl FnMut(&mut Self, &mut CodeGenContext<Emission>) -> Result<()>,
     ) -> Result<u32>;
 
-    /// Replace the current frame with a callee frame and jump to the callee.
+    /// Finish replacing a frame when the caller and tail callee have equally
+    /// sized incoming stack-argument areas.
+    fn finish_tail_call_same_size(&mut self) -> Result<()>;
+
+    /// Finish replacing a frame for a tail callee with no stack arguments.
+    fn finish_tail_call_empty(&mut self, plan: TailCallPlan) -> Result<()>;
+
+    /// Preserve the frame state that a resized argument move may overwrite,
+    /// invoke `move_args`, and then finish replacing the current frame.
     ///
-    /// The callee's stack arguments have already been staged below the current
-    /// frame. When a non-empty argument area changes size, two pointer-sized
-    /// scratch slots are reserved immediately below the staged arguments.
-    /// Implementations are responsible for preserving the caller's frame
-    /// state as needed, moving the staged arguments into their incoming
-    /// locations, restoring the caller's frame pointer, and jumping without
-    /// adding a return address.
-    fn tail_call(
+    /// `move_args` receives the distance from the current stack pointer to the
+    /// staged argument block. A callback is used because an implementation may
+    /// need to keep scratch registers live across the argument move.
+    fn with_tail_call_resize(
         &mut self,
-        caller_stack_args_size: u32,
-        callee_stack_args_size: u32,
-        callee: CalleeKind,
+        plan: TailCallPlan,
+        move_args: impl FnOnce(&mut Self, u32) -> Result<()>,
     ) -> Result<()>;
+
+    /// Jump to a tail callee without adding a return address.
+    fn tail_jump(&mut self, callee: CalleeKind);
 
     /// Record a GC stack map at the current code offset, which must be the
     /// return address of the call emitted immediately before. Each offset is

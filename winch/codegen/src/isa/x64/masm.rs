@@ -5,6 +5,7 @@ use super::{
     asm::{Assembler, PatchableAddToReg, VcmpKind, VcvtKind, VroundMode},
     regs::{self, rbp, rsp, scratch_fpr_bitset, scratch_gpr_bitset},
 };
+use crate::codegen::TailCallPlan;
 use crate::masm::{
     DivKind, Extend, ExtendKind, ExtractLaneKind, FloatCmpKind, FloatScratch, Imm as I, IntCmpKind,
     IntScratch, LaneSelector, LoadKind, MacroAssembler as Masm, MulWideKind, OperandSize, RegImm,
@@ -369,91 +370,62 @@ impl Masm for MacroAssembler {
         Ok(total_stack)
     }
 
-    fn tail_call(
-        &mut self,
-        caller_stack_args_size: u32,
-        callee_stack_args_size: u32,
-        callee: CalleeKind,
-    ) -> Result<()> {
+    fn finish_tail_call_same_size(&mut self) -> Result<()> {
+        self.asm.mov_rr(rbp(), writable!(rsp()), OperandSize::S64);
+        self.asm.pop_r(writable!(rbp()));
+        Ok(())
+    }
+
+    fn finish_tail_call_empty(&mut self, plan: TailCallPlan) -> Result<()> {
         let word_bytes = u32::from(<Self::ABI as ABI>::word_bytes());
-        let alignment = u32::from(<Self::ABI as ABI>::call_stack_align());
-        assert_eq!(caller_stack_args_size % alignment, 0);
-        assert_eq!(callee_stack_args_size % alignment, 0);
-
-        let caller_args = i32::try_from(caller_stack_args_size)?;
-        let callee_args = i32::try_from(callee_stack_args_size)?;
-        let args_delta = caller_args - callee_args;
-        let return_address_offset = i32::from(<Self::ABI as ABI>::word_bytes()) + args_delta;
-        let callee_args_offset = i32::from(<Self::ABI as ABI>::arg_base_offset()) + args_delta;
-
-        // Equal-sized argument areas cannot overwrite the saved frame state,
-        // so restore it directly after moving the staged arguments.
-        if caller_stack_args_size == callee_stack_args_size {
-            if callee_stack_args_size != 0 {
-                self.with_scratch::<IntScratch, _>(|masm, scratch| {
-                    let mut offset = callee_stack_args_size;
-                    while offset > 0 {
-                        offset -= word_bytes;
-                        masm.load_ptr(Address::offset(rsp(), offset), scratch.writable())?;
-                        masm.store_ptr(
-                            scratch.inner(),
-                            Address::offset_i32(rbp(), callee_args_offset + i32::try_from(offset)?),
-                        )?;
-                    }
-                    wasmtime_environ::error::Ok(())
-                })?;
-            }
-
-            self.asm.mov_rr(rbp(), writable!(rsp()), OperandSize::S64);
-            self.asm.pop_r(writable!(rbp()));
-            match callee {
-                CalleeKind::Indirect(reg) => self.asm.tail_jump_with_reg(reg),
-                CalleeKind::Direct(name) => self.asm.tail_jump_with_name(name),
-            }
-
-            self.sp_offset = 0;
-            return Ok(());
-        }
+        let return_address_offset = i32::try_from(i64::from(word_bytes) + plan.args_delta)?;
 
         // A zero-sized callee has no arguments to copy, and moving the return
         // address cannot overwrite the current frame pointer. Use one register
         // to slide the return address and then restore the frame pointer.
-        if callee_stack_args_size == 0 {
-            self.with_scratch::<IntScratch, _>(|masm, scratch| {
-                masm.load_ptr(
-                    Address::offset_i32(rbp(), i32::from(<Self::ABI as ABI>::word_bytes())),
-                    scratch.writable(),
-                )?;
-                masm.store_ptr(
-                    scratch.inner(),
-                    Address::offset_i32(rbp(), return_address_offset),
-                )?;
-
-                masm.load_ptr(Address::offset(rbp(), 0), scratch.writable())?;
-                masm.asm.lea(
-                    &Address::offset_i32(rbp(), return_address_offset),
-                    writable!(rsp()),
-                    OperandSize::S64,
-                );
-                masm.asm
-                    .mov_rr(scratch.inner(), writable!(rbp()), OperandSize::S64);
-
-                match callee {
-                    CalleeKind::Indirect(reg) => masm.asm.tail_jump_with_reg(reg),
-                    CalleeKind::Direct(name) => masm.asm.tail_jump_with_name(name),
-                }
-
-                wasmtime_environ::error::Ok(())
-            })?;
-
-            self.sp_offset = 0;
-            return Ok(());
-        }
-
         self.with_scratch::<IntScratch, _>(|masm, scratch| {
-            // Preserve the return address and caller frame pointer in the two
-            // scratch slots below the staged arguments. The argument move can
-            // overwrite both of their original frame slots.
+            masm.load_ptr(
+                Address::offset_i32(rbp(), i32::from(<Self::ABI as ABI>::word_bytes())),
+                scratch.writable(),
+            )?;
+            masm.store_ptr(
+                scratch.inner(),
+                Address::offset_i32(rbp(), return_address_offset),
+            )?;
+
+            masm.load_ptr(Address::offset(rbp(), 0), scratch.writable())?;
+            masm.asm.lea(
+                &Address::offset_i32(rbp(), return_address_offset),
+                writable!(rsp()),
+                OperandSize::S64,
+            );
+            masm.asm
+                .mov_rr(scratch.inner(), writable!(rbp()), OperandSize::S64);
+
+            wasmtime_environ::error::Ok(())
+        })
+    }
+
+    fn with_tail_call_resize(
+        &mut self,
+        plan: TailCallPlan,
+        move_args: impl FnOnce(&mut Self, u32) -> Result<()>,
+    ) -> Result<()> {
+        let word_bytes = u32::from(<Self::ABI as ABI>::word_bytes());
+        let return_address_offset = i32::try_from(i64::from(word_bytes) + plan.args_delta)?;
+
+        // Preserve the return address and caller frame pointer in two
+        // scratch slots below the staged arguments. The argument move
+        // can overwrite both of their original frame slots.
+        let scratch_size = align_to(
+            word_bytes * 2,
+            u32::from(<Self::ABI as ABI>::call_stack_align()),
+        );
+        self.reserve_stack(scratch_size)?;
+
+        // Save the frame state in memory so that the scratch register is
+        // available to the generic argument-moving callback.
+        self.with_scratch::<IntScratch, _>(|masm, scratch| {
             masm.load_ptr(
                 Address::offset_i32(rbp(), i32::from(<Self::ABI as ABI>::word_bytes())),
                 scratch.writable(),
@@ -461,26 +433,15 @@ impl Masm for MacroAssembler {
             masm.store_ptr(scratch.inner(), Address::offset(rsp(), 0))?;
             masm.load_ptr(Address::offset(rbp(), 0), scratch.writable())?;
             masm.store_ptr(scratch.inner(), Address::offset(rsp(), word_bytes))?;
+            wasmtime_environ::error::Ok(())
+        })?;
 
-            // The staged argument block is below its destination. Copy from
-            // high addresses to low addresses so overlapping moves are safe.
-            let scratch_bytes = word_bytes * 2;
-            let mut offset = callee_stack_args_size;
-            while offset > 0 {
-                offset -= word_bytes;
-                masm.load_ptr(
-                    Address::offset(rsp(), scratch_bytes + offset),
-                    scratch.writable(),
-                )?;
-                masm.store_ptr(
-                    scratch.inner(),
-                    Address::offset_i32(rbp(), callee_args_offset + i32::try_from(offset)?),
-                )?;
-            }
+        move_args(self, scratch_size)?;
 
+        self.with_scratch::<IntScratch, _>(|masm, scratch| {
             // Slide the original return address so that the end of the
-            // incoming argument area remains anchored across a chain of tail
-            // calls, then discard this frame.
+            // incoming argument area remains anchored across a chain
+            // of tail calls, then discard this frame.
             masm.load_ptr(Address::offset(rsp(), 0), scratch.writable())?;
             masm.store_ptr(
                 scratch.inner(),
@@ -495,18 +456,15 @@ impl Masm for MacroAssembler {
             masm.asm
                 .mov_rr(scratch.inner(), writable!(rbp()), OperandSize::S64);
 
-            match callee {
-                CalleeKind::Indirect(reg) => masm.asm.tail_jump_with_reg(reg),
-                CalleeKind::Direct(name) => masm.asm.tail_jump_with_name(name),
-            }
-
             wasmtime_environ::error::Ok(())
-        })?;
+        })
+    }
 
-        // There is no fallthrough from the tail jump, but keeping the abstract
-        // state at the frame base makes unreachable-code bookkeeping sane.
-        self.sp_offset = 0;
-        Ok(())
+    fn tail_jump(&mut self, callee: CalleeKind) {
+        match callee {
+            CalleeKind::Indirect(reg) => self.asm.tail_jump_with_reg(reg),
+            CalleeKind::Direct(name) => self.asm.tail_jump_with_name(name),
+        }
     }
 
     fn load_ptr(&mut self, src: Self::Address, dst: WritableReg) -> Result<()> {
@@ -1118,6 +1076,10 @@ impl Masm for MacroAssembler {
 
     fn address_at_reg(&self, reg: Reg, offset: u32) -> Result<Self::Address> {
         Ok(Address::offset(reg, offset))
+    }
+
+    fn address_at_fp(&self, offset: i64) -> Result<Self::Address> {
+        Ok(Address::offset_i32(rbp(), i32::try_from(offset)?))
     }
 
     fn cmp(&mut self, src1: Reg, src2: RegImm, size: OperandSize) -> Result<()> {
