@@ -699,6 +699,10 @@ name = "call"
 harness = false
 
 [[bench]]
+name = "tail_calls"
+harness = false
+
+[[bench]]
 name = "wasi"
 harness = false
 
