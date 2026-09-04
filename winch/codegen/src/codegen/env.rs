@@ -192,6 +192,23 @@ impl<'a, 'translation, 'data, P: PtrSize> FuncEnv<'a, 'translation, 'data, P> {
         }
     }
 
+    /// Returns whether an ordinary call to `callee` may return with a stack
+    /// pointer changed by a tail-call chain.
+    pub(crate) fn callee_may_tail_call(&self, callee: &Callee) -> bool {
+        match callee {
+            Callee::Local(idx) => {
+                let idx = self.translation.module.defined_func_index(*idx).unwrap();
+                self.translation
+                    .function_body_may_tail_call
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(true)
+            }
+            Callee::Builtin(_) | Callee::BuiltinWithDifferentVmctx(_, _) => false,
+            Callee::Import(_) | Callee::FuncRef(_) => true,
+        }
+    }
+
     /// Converts a [wasmparser::BlockType] into a [BlockSig].
     pub(crate) fn resolve_block_sig(&self, ty: BlockType) -> Result<BlockSig> {
         use BlockType::*;

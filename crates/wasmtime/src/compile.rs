@@ -85,7 +85,7 @@ pub(crate) fn build_module_artifacts<T: FinishedObject>(
     )
     .translate(parser, wasm)
     .context("failed to parse WebAssembly module")?;
-    prepare_translation(engine, compiler, &mut translation, &mut types);
+    prepare_translation(engine, compiler, &mut translation, &mut types)?;
     let functions = mem::take(&mut translation.function_body_inputs);
 
     let compile_inputs = CompileInputs::for_module(&types, &translation, functions);
@@ -172,7 +172,7 @@ pub(crate) fn build_component_artifacts<T: FinishedObject>(
             compiler,
             translation,
             types.module_types_builder_mut(),
-        );
+        )?;
     }
 
     let compile_inputs = CompileInputs::for_component(
@@ -245,7 +245,7 @@ fn prepare_translation(
     compiler: &dyn Compiler,
     translation: &mut ModuleTranslation<'_>,
     types: &mut ModuleTypesBuilder,
-) {
+) -> Result<()> {
     // If configured attempt to use static memory initialization
     // which can either at runtime be implemented as a single memcpy
     // to initialize memory or otherwise enabling
@@ -258,6 +258,9 @@ fn prepare_translation(
     // Attempt to convert table initializer segments to FuncTable
     // representation where possible, to enable table lazy init.
     translation.finalize_table_init(engine.tunables(), types);
+
+    compiler.prepare_module(translation)?;
+    Ok(())
 }
 
 type CompileInput<'a> = Box<dyn FnOnce(&dyn Compiler) -> Result<CompileOutput<'a>> + Send + 'a>;

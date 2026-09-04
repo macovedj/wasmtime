@@ -105,7 +105,26 @@ fn box_dyn_any(x: impl Any + Send + Sync) -> Box<dyn Any + Send + Sync> {
     b
 }
 
+fn may_contain_tail_call_opcode(body: &[u8]) -> bool {
+    memchr::memchr3(0x12, 0x13, 0x15, body).is_some()
+}
+
 impl wasmtime_environ::Compiler for Compiler {
+    fn prepare_module(&self, translation: &mut ModuleTranslation<'_>) -> Result<(), CompileError> {
+        let mut may_tail_call = PrimaryMap::with_capacity(translation.function_body_inputs.len());
+        for body in translation.function_body_inputs.values() {
+            // Tail-call opcodes are single-byte instructions. A matching byte
+            // can also occur in an immediate, so this can conservatively mark
+            // a function that does not actually contain a tail call. False
+            // positives only emit an unnecessary post-call stack recovery;
+            // avoiding a second operator-decoding pass keeps this preparation
+            // cheap.
+            may_tail_call.push(may_contain_tail_call_opcode(body.body.as_bytes()));
+        }
+        translation.function_body_may_tail_call = may_tail_call;
+        Ok(())
+    }
+
     fn inlining_compiler(&self) -> Option<&dyn wasmtime_environ::InliningCompiler> {
         None
     }
@@ -229,6 +248,23 @@ impl wasmtime_environ::Compiler for Compiler {
         func: &'a dyn Any,
     ) -> Box<dyn Iterator<Item = FuncKey> + 'a> {
         self.trampolines.compiled_function_relocation_targets(func)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::may_contain_tail_call_opcode;
+
+    #[test]
+    fn conservatively_detects_tail_call_opcode_bytes() {
+        assert!(!may_contain_tail_call_opcode(&[0x10, 0x11, 0x14]));
+        assert!(may_contain_tail_call_opcode(&[0x12]));
+        assert!(may_contain_tail_call_opcode(&[0x13]));
+        assert!(may_contain_tail_call_opcode(&[0x15]));
+
+        // `i32.const 18` contains 0x12 as its immediate rather than as an
+        // opcode. Treating it as a candidate is an intentional false positive.
+        assert!(may_contain_tail_call_opcode(&[0x41, 0x12, 0x0b]));
     }
 }
 

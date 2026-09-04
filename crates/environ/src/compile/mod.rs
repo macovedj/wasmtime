@@ -228,6 +228,12 @@ pub struct CompiledFunctionBody {
 ///           +--------+
 /// ```
 pub trait Compiler: Send + Sync {
+    /// Prepare compiler-specific metadata before function bodies are moved out
+    /// of the module translation for parallel compilation.
+    fn prepare_module(&self, _translation: &mut ModuleTranslation<'_>) -> Result<(), CompileError> {
+        Ok(())
+    }
+
     /// Get this compiler's inliner.
     ///
     /// Consumers of this trait **must** check for when when this method returns

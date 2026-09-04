@@ -5089,6 +5089,7 @@ dependencies = [
  "cranelift-codegen",
  "gimli 0.33.0",
  "log",
+ "memchr",
  "object 0.40.0",
  "target-lexicon 0.13.5",
  "wasmparser 0.254.0",
