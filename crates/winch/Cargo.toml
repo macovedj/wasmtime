@@ -21,6 +21,7 @@ wasmtime-cranelift = { workspace = true }
 wasmparser = { workspace = true }
 gimli = { workspace = true, features = ['std'] }
 log = { workspace = true }
+memchr = "2.4"
 
 [features]
 all-arch = ["winch-codegen/all-arch"]
