@@ -106,6 +106,45 @@ fn box_dyn_any(x: impl Any + Send + Sync) -> Box<dyn Any + Send + Sync> {
 }
 
 impl wasmtime_environ::Compiler for Compiler {
+    fn prepare_module(&self, translation: &mut ModuleTranslation<'_>) -> Result<(), CompileError> {
+        let mut may_tail_call = PrimaryMap::with_capacity(translation.function_body_inputs.len());
+        for body in translation.function_body_inputs.values() {
+            // Tail-call opcodes are single-byte instructions. Most functions
+            // do not contain any of these bytes, so avoid fully decoding their
+            // operators. A matching byte can also occur in an immediate; in
+            // that case the operator scan below resolves the false positive.
+            if !body
+                .body
+                .as_bytes()
+                .iter()
+                .any(|byte| matches!(*byte, 0x12 | 0x13 | 0x15))
+            {
+                may_tail_call.push(false);
+                continue;
+            }
+
+            let mut found = false;
+            for op in body
+                .body
+                .get_operators_reader()
+                .map_err(|e| CompileError::Wasm(e.into()))?
+            {
+                match op.map_err(|e| CompileError::Wasm(e.into()))? {
+                    wasmparser::Operator::ReturnCall { .. }
+                    | wasmparser::Operator::ReturnCallIndirect { .. }
+                    | wasmparser::Operator::ReturnCallRef { .. } => {
+                        found = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            may_tail_call.push(found);
+        }
+        translation.function_body_may_tail_call = may_tail_call;
+        Ok(())
+    }
+
     fn inlining_compiler(&self) -> Option<&dyn wasmtime_environ::InliningCompiler> {
         None
     }

@@ -96,6 +96,12 @@ pub struct ModuleTranslation<'data> {
     /// References to the function bodies.
     pub function_body_inputs: PrimaryMap<DefinedFuncIndex, FunctionBodyData<'data>>,
 
+    /// Whether each defined function contains a tail-call operator.
+    ///
+    /// This remains available to compilers after `function_body_inputs` is
+    /// moved out of the translation for parallel compilation.
+    pub function_body_may_tail_call: PrimaryMap<DefinedFuncIndex, bool>,
+
     /// For each imported function, the single statically-known function that
     /// always satisfies that import, if any.
     ///
@@ -227,6 +233,7 @@ impl<'data> ModuleTranslation<'data> {
             wasm: &[],
             wasm_module_offset: 0,
             function_body_inputs: PrimaryMap::default(),
+            function_body_may_tail_call: PrimaryMap::default(),
             known_imported_functions: SecondaryMap::default(),
             exported_signatures: Vec::default(),
             debuginfo: DebugInfoData::default(),

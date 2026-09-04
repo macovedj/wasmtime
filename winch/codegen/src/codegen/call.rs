@@ -130,6 +130,7 @@ impl FnCall {
         context: &mut CodeGenContext<Emission>,
         callee: Callee,
     ) -> Result<()> {
+        let callee_may_tail_call = env.callee_may_tail_call(&callee);
         let (kind, callee_context) = Self::lower(env, context.vmoffsets, &callee, context, masm)?;
 
         let sig = env.callee_sig::<M::ABI>(&callee)?;
@@ -157,6 +158,7 @@ impl FnCall {
             sig,
             &callee_context,
             &kind,
+            callee_may_tail_call,
             reserved_stack,
             ret_area,
             masm,
@@ -516,6 +518,7 @@ impl FnCall {
         sig: &ABISig,
         callee_context: &ContextArgs,
         callee_kind: &CalleeKind,
+        callee_may_tail_call: bool,
         reserved_space: u32,
         ret_area: Option<RetArea>,
         masm: &mut M,
@@ -536,7 +539,11 @@ impl FnCall {
         }
         // Deallocate the reserved space for stack arguments and for alignment,
         // which was allocated last.
-        masm.restore_stack_after_call(reserved_space)?;
+        if callee_may_tail_call {
+            masm.restore_stack_after_call(reserved_space)?;
+        } else {
+            masm.free_stack(reserved_space)?;
+        }
 
         ensure!(
             sig.params.len_without_retptr() >= callee_context.len(),
