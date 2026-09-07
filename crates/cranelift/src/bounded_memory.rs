@@ -219,24 +219,15 @@ impl State {
                     continue;
                 }
 
-                let mask = if band_mask(func, index).is_some() {
-                    None
-                } else {
-                    // Build the speculative-safety mask from the span's
-                    // capacity, rather than requiring the proven maximum to
-                    // already be one less than a power of two.
-                    let Some(available) = span
-                        .len
-                        .checked_sub(access.static_offset)
-                        .and_then(|n| n.checked_sub(u32::from(access.access_size)))
-                    else {
-                        continue;
-                    };
-                    let index_mask = available >> shift;
-                    if index_mask & index_mask.wrapping_add(1) != 0 || index_max > index_mask {
-                        continue;
-                    }
-                    Some(index_mask)
+                let Some(mask) = speculation_mask(
+                    span.len,
+                    access.static_offset,
+                    access.access_size,
+                    shift,
+                    index_max,
+                    band_mask(func, index),
+                ) else {
+                    continue;
                 };
 
                 if !rewritten_insts.insert(old_addr_inst) {
@@ -614,11 +605,24 @@ impl<'a> RangeAnalysis<'a> {
             let else_dominates = self
                 .domtree
                 .block_dominates(else_block.block(&self.func.dfg.value_lists), block);
-            let truth = match (then_dominates, else_dominates) {
-                (true, false) => true,
-                (false, true) => false,
+            let (truth, successor) = match (then_dominates, else_dominates) {
+                (true, false) => (true, then_block),
+                (false, true) => (false, else_block),
                 _ => continue,
             };
+            // A dominating successor does not by itself prove which edge was
+            // taken: the other arm might rejoin it. Require this branch to be
+            // its only predecessor. The match above also rejects a branch
+            // with identical destinations (CFG predecessors are instructions,
+            // not individual edges). Conservatively ignore loop joins too.
+            let mut predecessors = self
+                .cfg
+                .pred_iter(successor.block(&self.func.dfg.value_lists));
+            if predecessors.next().is_none_or(|pred| pred.inst != inst)
+                || predecessors.next().is_some()
+            {
+                continue;
+            }
             let constraint = self.condition_constraint(value, arg, truth, dom_block);
             result = Some(result.map_or(constraint, |old| old.intersect(constraint)));
         }
@@ -784,6 +788,40 @@ fn scaled_offset(func: &Function, value: Value) -> Option<(Value, u8)> {
     (shift < 32).then_some((args[0], shift))
 }
 
+/// Return the mask to insert, or `Some(None)` if the existing mask suffices.
+/// `None` means no suitable speculative bound is available; skip the rewrite.
+fn speculation_mask(
+    len: u32,
+    static_offset: u32,
+    access_size: u8,
+    shift: u8,
+    index_max: u32,
+    existing_mask: Option<u32>,
+) -> Option<Option<u32>> {
+    let available = len
+        .checked_sub(static_offset)?
+        .checked_sub(u32::from(access_size))?;
+    let capacity = available.checked_shr(u32::from(shift))?;
+    if index_max > capacity {
+        return None;
+    }
+
+    // A branch-derived range only constrains architectural execution. An
+    // existing mask must independently fit the span, including the scale,
+    // static offset, and complete access width, to bound speculation too.
+    if existing_mask.is_some_and(|mask| mask <= capacity) {
+        return Some(None);
+    }
+
+    // Build a mask from the span's capacity, not the branch-derived maximum.
+    // A contiguous low-bit mask preserves every architecturally valid index.
+    // Apply it to the original index, retaining any existing mask as well.
+    if capacity & capacity.wrapping_add(1) != 0 {
+        return None;
+    }
+    Some(Some(capacity))
+}
+
 fn band_mask(func: &Function, value: Value) -> Option<u32> {
     let value = func.dfg.resolve_aliases(value);
     let inst = func.dfg.value_def(value).inst()?;
@@ -900,4 +938,108 @@ fn apply_rewrite(func: &mut Function, rewrite: Rewrite) {
     // Deliberately leave the original address expression in place. The normal
     // optimizer will remove it when dead, while any other users retain the
     // original Wasm address semantics.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // These graphs contain only comparisons, branches, and returns. Exercise
+    // the proof itself without constructing native memory accesses.
+    fn branch_range(
+        destinations: [usize; 2],
+        successors: [Option<usize>; 2],
+        at: usize,
+    ) -> (u64, u64) {
+        let mut func = Function::new();
+        func.signature
+            .params
+            .push(ir::AbiParam::new(ir::types::I32));
+        let blocks = [
+            func.dfg.make_block(),
+            func.dfg.make_block(),
+            func.dfg.make_block(),
+        ];
+        let value = func.dfg.append_block_param(blocks[0], ir::types::I32);
+        let mut pos = FuncCursor::new(&mut func);
+        pos.insert_block(blocks[0]);
+        let limit = pos.ins().iconst(ir::types::I32, 16);
+        let condition = pos.ins().icmp(IntCC::UnsignedLessThan, value, limit);
+        pos.ins().brif(
+            condition,
+            blocks[destinations[0]],
+            &[],
+            blocks[destinations[1]],
+            &[],
+        );
+        for (i, successor) in successors.into_iter().enumerate() {
+            pos.insert_block(blocks[i + 1]);
+            if let Some(successor) = successor {
+                pos.ins().jump(blocks[successor], &[]);
+            } else {
+                pos.ins().return_(&[]);
+            }
+        }
+
+        let flags = cranelift_codegen::settings::Flags::new(cranelift_codegen::settings::builder());
+        cranelift_codegen::verify_function(&func, &flags).unwrap();
+        let cfg = ControlFlowGraph::with_function(&func);
+        let domtree = DominatorTree::with_function(&func, &cfg);
+        let range = RangeAnalysis::new(&func, &cfg, &domtree).range_at(value, blocks[at]);
+        (range.min, range.max)
+    }
+
+    #[test]
+    fn branch_facts_on_unique_edges() {
+        assert_eq!(branch_range([1, 2], [None, None], 1), (0, 15));
+        assert_eq!(
+            branch_range([1, 2], [None, None], 2),
+            (16, u64::from(u32::MAX))
+        );
+    }
+
+    #[test]
+    fn branch_facts_do_not_cross_reconvergence() {
+        let full = (0, u64::from(u32::MAX));
+        assert_eq!(branch_range([1, 2], [Some(2), None], 2), full);
+        assert_eq!(branch_range([1, 2], [None, Some(1)], 1), full);
+    }
+
+    #[test]
+    fn branch_facts_reject_duplicate_destinations_and_loop_joins() {
+        let full = (0, u64::from(u32::MAX));
+        assert_eq!(branch_range([1, 1], [None, None], 1), full);
+        assert_eq!(branch_range([1, 2], [Some(2), Some(1)], 1), full);
+        assert_eq!(branch_range([1, 2], [Some(2), Some(1)], 2), full);
+    }
+
+    #[test]
+    fn speculation_masks_preserve_sufficient_existing_bounds() {
+        assert_eq!(speculation_mask(64, 0, 4, 2, 15, Some(15)), Some(None));
+        // Non-contiguous existing masks are also safe when they fit.
+        assert_eq!(speculation_mask(44, 0, 4, 2, 10, Some(10)), Some(None));
+        assert_eq!(speculation_mask(4, 0, 4, 2, 0, Some(0)), Some(None));
+    }
+
+    #[test]
+    fn speculation_masks_tighten_or_reject_insufficient_bounds() {
+        assert_eq!(speculation_mask(64, 0, 4, 2, 7, Some(31)), Some(Some(15)));
+        assert_eq!(speculation_mask(64, 0, 4, 2, 7, None), Some(Some(15)));
+        // An unsupported capacity cannot safely be used as a new mask.
+        assert_eq!(speculation_mask(44, 0, 4, 2, 7, Some(15)), None);
+        assert_eq!(speculation_mask(44, 0, 4, 2, 7, None), None);
+        // Even an insertable mask must preserve the architectural range.
+        assert_eq!(speculation_mask(64, 0, 4, 2, 16, Some(31)), None);
+    }
+
+    #[test]
+    fn speculation_masks_account_for_the_complete_access() {
+        assert_eq!(speculation_mask(68, 4, 4, 2, 15, Some(15)), Some(None));
+        assert_eq!(speculation_mask(64, 4, 4, 2, 7, Some(15)), None);
+        assert_eq!(speculation_mask(64, 0, 8, 2, 7, Some(15)), None);
+        assert_eq!(speculation_mask(64, 0, 4, 3, 7, Some(15)), Some(Some(7)));
+        assert_eq!(speculation_mask(3, 4, 1, 0, 0, None), None);
+        assert_eq!(speculation_mask(4, 1, 4, 0, 0, None), None);
+        assert_eq!(speculation_mask(64, 0, 4, 32, 0, None), None);
+    }
 }
