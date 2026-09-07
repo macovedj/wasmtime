@@ -5,7 +5,7 @@
   (memory 1)
 
   ;; Shifting an arbitrary i32 right by 21 produces a value no larger than
-  ;; 2047.
+  ;; 2047, but structural shift propagation is deliberately out of scope.
   (func $load_through_unsigned_shift
     (param $base i32)
     (param $index i32)
@@ -26,7 +26,8 @@
     i32.add
     i32.load)
 
-  ;; Both arms of the select are inside the checked span.
+  ;; Both arms fit, but structural select propagation is out of scope. Retain
+  ;; the original address form rather than inferring a range from the arms.
   (func $load_through_select
     (param $base i32)
     (param $condition i32)
@@ -144,65 +145,71 @@
 ;;       mov     x29, sp
 ;;       ldur    x16, [x2, #8]
 ;;       ldur    x16, [x16, #0x18]
-;;       add     x16, x16, #0x20
+;;       add     x16, x16, #0x30
 ;;       cmp     sp, x16
-;;       b.lo    #0x6c
-;;   1c: stp     x19, x20, [sp, #-0x10]!
-;;       mov     x20, x5
+;;       b.lo    #0x78
+;;   1c: str     x21, [sp, #-0x10]!
+;;       stp     x19, x20, [sp, #-0x10]!
+;;       mov     x21, x5
 ;;       ldr     x13, [x2, #0x40]
 ;;       mov     w14, w4
 ;;       mov     x5, #0x2000
 ;;       add     x14, x14, #2, lsl #12
 ;;       cmp     x14, x13
-;;       b.hi    #0x70
-;;   3c: ldr     x15, [x2, #0x38]
-;;       add     x19, x15, w4, uxtw
+;;       b.hi    #0x7c
+;;   40: ldr     x19, [x2, #0x38]
+;;       add     x3, x19, w4, uxtw
+;;       mov     x20, x4
 ;;       mov     x4, x6
-;;       mov     x3, x19
-;;       bl      #0x320
-;;   50: mov     x5, x20
+;;       bl      #0x340
+;;   54: mov     x5, x21
 ;;       lsr     w0, w5, #0x15
-;;       and     w0, w0, #0x7ff
-;;       ldr     w2, [x19, w0, uxtw #2]
+;;       mov     x4, x20
+;;       add     w0, w4, w0, lsl #2
+;;       ldr     w2, [x19, w0, uxtw]
 ;;       ldp     x19, x20, [sp], #0x10
+;;       ldr     x21, [sp], #0x10
 ;;       ldp     x29, x30, [sp], #0x10
 ;;       ret
-;;   6c: udf     #0xc11f
-;;   70: udf     #0xc11f
+;;   78: udf     #0xc11f
+;;   7c: udf     #0xc11f
 ;;
 ;; wasm[0]::function[1]::load_through_select:
 ;;       stp     x29, x30, [sp, #-0x10]!
 ;;       mov     x29, sp
 ;;       ldur    x16, [x2, #8]
 ;;       ldur    x16, [x16, #0x18]
-;;       add     x16, x16, #0x20
+;;       add     x16, x16, #0x30
 ;;       cmp     sp, x16
-;;       b.lo    #0xf8
-;;   9c: stp     x19, x20, [sp, #-0x10]!
-;;       mov     x20, x5
+;;       b.lo    #0x104
+;;   9c: str     x21, [sp, #-0x10]!
+;;       stp     x19, x20, [sp, #-0x10]!
+;;       mov     x21, x5
 ;;       ldr     x15, [x2, #0x40]
 ;;       mov     w0, w4
 ;;       mov     x5, #0x2000
 ;;       add     x0, x0, #2, lsl #12
 ;;       cmp     x0, x15
-;;       b.hi    #0xfc
-;;   bc: ldr     x0, [x2, #0x38]
-;;       add     x19, x0, w4, uxtw
+;;       b.hi    #0x108
+;;   c0: ldr     x19, [x2, #0x38]
+;;       add     x3, x19, w4, uxtw
+;;       mov     x20, x4
 ;;       mov     x4, x6
-;;       mov     x3, x19
-;;       bl      #0x320
-;;   d0: mov     w0, #0x400
+;;       bl      #0x340
+;;   d4: mov     w0, #0x400
 ;;       mov     w1, #0x7ff
-;;       mov     x5, x20
+;;       mov     x5, x21
 ;;       cmp     w5, wzr
 ;;       csel    x0, x0, x1, ne
-;;       and     w0, w0, #0x7ff
-;;       ldr     w2, [x19, w0, uxtw #2]
+;;       mov     x4, x20
+;;       add     w0, w4, w0, lsl #2
+;;       ldr     w2, [x19, w0, uxtw]
 ;;       ldp     x19, x20, [sp], #0x10
+;;       ldr     x21, [sp], #0x10
 ;;       ldp     x29, x30, [sp], #0x10
 ;;       ret
-;;   f8: udf     #0xc11f
-;;   fc: udf     #0xc11f
+;;  104: udf     #0xc11f
+;;  108: udf     #0xc11f
 ;;
 ;; wasm[0]::function[2]::load_through_safe_subtraction:
 ;;       stp     x29, x30, [sp, #-0x10]!
@@ -211,34 +218,34 @@
 ;;       ldur    x16, [x16, #0x18]
 ;;       add     x16, x16, #0x20
 ;;       cmp     sp, x16
-;;       b.lo    #0x178
-;;  11c: stp     x19, x20, [sp, #-0x10]!
+;;       b.lo    #0x198
+;;  13c: stp     x19, x20, [sp, #-0x10]!
 ;;       mov     x20, x5
 ;;       ldr     x13, [x2, #0x40]
 ;;       mov     w14, w4
 ;;       mov     x5, #0x2000
 ;;       add     x14, x14, #2, lsl #12
 ;;       cmp     x14, x13
-;;       b.hi    #0x17c
-;;  13c: ldr     x15, [x2, #0x38]
+;;       b.hi    #0x19c
+;;  15c: ldr     x15, [x2, #0x38]
 ;;       add     x19, x15, w4, uxtw
 ;;       mov     x4, x6
 ;;       mov     x3, x19
-;;       bl      #0x320
-;;  150: mov     x5, x20
-;;       cbz     w5, #0x180
-;;  158: cmp     w5, #0x801
-;;       b.hs    #0x184
-;;  160: sub     w0, w5, #1
+;;       bl      #0x340
+;;  170: mov     x5, x20
+;;       cbz     w5, #0x1a0
+;;  178: cmp     w5, #0x801
+;;       b.hs    #0x1a4
+;;  180: sub     w0, w5, #1
 ;;       and     w0, w0, #0x7ff
 ;;       ldr     w2, [x19, w0, uxtw #2]
 ;;       ldp     x19, x20, [sp], #0x10
 ;;       ldp     x29, x30, [sp], #0x10
 ;;       ret
-;;  178: udf     #0xc11f
-;;  17c: udf     #0xc11f
-;;  180: udf     #0xc11f
-;;  184: udf     #0xc11f
+;;  198: udf     #0xc11f
+;;  19c: udf     #0xc11f
+;;  1a0: udf     #0xc11f
+;;  1a4: udf     #0xc11f
 ;;
 ;; wasm[0]::function[3]::load_through_monotonic_or_bound:
 ;;       stp     x29, x30, [sp, #-0x10]!
@@ -247,32 +254,32 @@
 ;;       ldur    x16, [x16, #0x18]
 ;;       add     x16, x16, #0x20
 ;;       cmp     sp, x16
-;;       b.lo    #0x214
-;;  1bc: stp     x19, x20, [sp, #-0x10]!
+;;       b.lo    #0x234
+;;  1dc: stp     x19, x20, [sp, #-0x10]!
 ;;       mov     x20, x5
 ;;       ldr     x13, [x2, #0x40]
 ;;       mov     w14, w4
 ;;       mov     x5, #0x2000
 ;;       add     x14, x14, #2, lsl #12
 ;;       cmp     x14, x13
-;;       b.hi    #0x218
-;;  1dc: ldr     x15, [x2, #0x38]
+;;       b.hi    #0x238
+;;  1fc: ldr     x15, [x2, #0x38]
 ;;       add     x19, x15, w4, uxtw
 ;;       mov     x4, x6
 ;;       mov     x3, x19
-;;       bl      #0x320
-;;  1f0: mov     x5, x20
+;;       bl      #0x340
+;;  210: mov     x5, x20
 ;;       orr     w0, w5, #1
 ;;       cmp     w0, #0x800
-;;       b.hs    #0x21c
-;;  200: and     w0, w5, #0x7ff
+;;       b.hs    #0x23c
+;;  220: and     w0, w5, #0x7ff
 ;;       ldr     w2, [x19, w0, uxtw #2]
 ;;       ldp     x19, x20, [sp], #0x10
 ;;       ldp     x29, x30, [sp], #0x10
 ;;       ret
-;;  214: udf     #0xc11f
-;;  218: udf     #0xc11f
-;;  21c: udf     #0xc11f
+;;  234: udf     #0xc11f
+;;  238: udf     #0xc11f
+;;  23c: udf     #0xc11f
 ;;
 ;; wasm[0]::function[4]::load_through_extend_reduce:
 ;;       stp     x29, x30, [sp, #-0x10]!
@@ -281,28 +288,28 @@
 ;;       ldur    x16, [x16, #0x18]
 ;;       add     x16, x16, #0x20
 ;;       cmp     sp, x16
-;;       b.lo    #0x290
-;;  23c: stp     x19, x20, [sp, #-0x10]!
+;;       b.lo    #0x2b0
+;;  25c: stp     x19, x20, [sp, #-0x10]!
 ;;       mov     x20, x5
 ;;       ldr     x12, [x2, #0x40]
 ;;       mov     w13, w4
 ;;       mov     x5, #0x2000
 ;;       add     x13, x13, #2, lsl #12
 ;;       cmp     x13, x12
-;;       b.hi    #0x294
-;;  25c: ldr     x14, [x2, #0x38]
+;;       b.hi    #0x2b4
+;;  27c: ldr     x14, [x2, #0x38]
 ;;       add     x19, x14, w4, uxtw
 ;;       mov     x4, x6
 ;;       mov     x3, x19
-;;       bl      #0x320
-;;  270: mov     x5, x20
+;;       bl      #0x340
+;;  290: mov     x5, x20
 ;;       cmp     w5, #0x800
-;;       b.hs    #0x298
-;;  27c: and     w0, w5, #0x7ff
+;;       b.hs    #0x2b8
+;;  29c: and     w0, w5, #0x7ff
 ;;       ldr     w2, [x19, w0, uxtw #2]
 ;;       ldp     x19, x20, [sp], #0x10
 ;;       ldp     x29, x30, [sp], #0x10
 ;;       ret
-;;  290: udf     #0xc11f
-;;  294: udf     #0xc11f
-;;  298: udf     #0xc11f
+;;  2b0: udf     #0xc11f
+;;  2b4: udf     #0xc11f
+;;  2b8: udf     #0xc11f

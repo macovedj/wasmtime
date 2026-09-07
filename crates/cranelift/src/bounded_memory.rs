@@ -4,7 +4,7 @@
 //! `heap_base + uextend(wasm_addr)`. Because `wasm_addr` has wrapping i32
 //! semantics, an expression such as `base + (index << shift)` must ordinarily
 //! be evaluated in i32 before it is extended. This prevents AArch64 from using
-//! its native `base + uextend(index << shift)` addressing mode directly.
+//! its native `base + (uextend(index) << shift)` addressing mode directly.
 //!
 //! A preceding bulk-memory bounds check gives us a stronger fact. If it checks
 //! every byte in `[base, base + len)`, then an access whose complete range is
@@ -297,6 +297,9 @@ impl Range {
     }
 }
 
+// Keep structural arithmetic deliberately narrow: constant subtraction is
+// enough to follow decreasing loop counters. Other arithmetic can still be
+// bounded by a branch, but otherwise falls back to the full unsigned range.
 struct RangeAnalysis<'a> {
     func: &'a Function,
     cfg: &'a ControlFlowGraph,
@@ -363,8 +366,14 @@ impl<'a> RangeAnalysis<'a> {
                             Range { min: 0, max }
                         }
                     }
-                    Opcode::Iadd => self.add_range(args[0], args[1], block),
-                    Opcode::Isub => self.sub_range(args[0], args[1], block),
+                    Opcode::Iadd => self.sub_via_add_range(args[0], args[1], block),
+                    Opcode::Isub => {
+                        if let Some(c) = iconst_u32(self.func, args[1]) {
+                            self.sub_constant_range(args[0], c, block)
+                        } else {
+                            Range::I32_FULL
+                        }
+                    }
                     Opcode::Band => {
                         if let Some(mask) = iconst_u32(self.func, args[0])
                             .or_else(|| iconst_u32(self.func, args[1]))
@@ -377,67 +386,13 @@ impl<'a> RangeAnalysis<'a> {
                             Range::I32_FULL
                         }
                     }
-                    Opcode::Bor => {
-                        let (other, constant) = if let Some(c) = iconst_u32(self.func, args[0]) {
-                            (args[1], c)
-                        } else if let Some(c) = iconst_u32(self.func, args[1]) {
-                            (args[0], c)
-                        } else {
-                            return Range::I32_FULL;
-                        };
-                        let other = self.range_at(other, block);
-                        let envelope = if other.max == 0 {
-                            0
-                        } else {
-                            other
-                                .max
-                                .checked_add(1)
-                                .and_then(u64::checked_next_power_of_two)
-                                .map_or(u64::from(u32::MAX), |n| n - 1)
-                        };
-                        Range {
-                            min: 0,
-                            max: (envelope | u64::from(constant)).min(u64::from(u32::MAX)),
-                        }
-                    }
-                    Opcode::Ishl => {
-                        let Some(shift) = iconst_u32(self.func, args[1]) else {
-                            return Range::I32_FULL;
-                        };
-                        let shift = shift & 31;
-                        let input = self.range_at(args[0], block);
-                        if input.max <= (u64::from(u32::MAX) >> shift) {
-                            Range {
-                                min: input.min << shift,
-                                max: input.max << shift,
-                            }
-                        } else {
-                            Range::I32_FULL
-                        }
-                    }
-                    Opcode::Ushr => {
-                        let Some(shift) = iconst_u32(self.func, args[1]) else {
-                            return Range::I32_FULL;
-                        };
-                        let shift = shift & 31;
-                        let input = self.range_at(args[0], block);
-                        Range {
-                            min: input.min >> shift,
-                            max: input.max >> shift,
-                        }
-                    }
-                    Opcode::Select | Opcode::SelectSpectreGuard => {
-                        let a = self.range_at(args[args.len() - 2], block);
-                        let b = self.range_at(args[args.len() - 1], block);
-                        a.union(b)
-                    }
                     _ => Range::I32_FULL,
                 }
             }
         }
     }
 
-    fn add_range(&mut self, a: Value, b: Value, block: Block) -> Range {
+    fn sub_via_add_range(&mut self, a: Value, b: Value, block: Block) -> Range {
         // Cranelift represents subtraction by a constant as addition of its
         // two's-complement value in several frontend paths.
         if let Some(c) = iconst_u32(self.func, b)
@@ -451,34 +406,7 @@ impl<'a> RangeAnalysis<'a> {
             return self.sub_constant_range(b, c.wrapping_neg(), block);
         }
 
-        let a = self.range_at(a, block);
-        let b = self.range_at(b, block);
-        let max = a.max.checked_add(b.max);
-        if max.is_some_and(|max| max <= u64::from(u32::MAX)) {
-            Range {
-                min: a.min + b.min,
-                max: max.unwrap(),
-            }
-        } else {
-            Range::I32_FULL
-        }
-    }
-
-    fn sub_range(&mut self, a: Value, b: Value, block: Block) -> Range {
-        if let Some(c) = iconst_u32(self.func, b) {
-            self.sub_constant_range(a, c, block)
-        } else {
-            let a = self.range_at(a, block);
-            let b = self.range_at(b, block);
-            if a.min >= b.max {
-                Range {
-                    min: a.min - b.max,
-                    max: a.max - b.min,
-                }
-            } else {
-                Range::I32_FULL
-            }
-        }
+        Range::I32_FULL
     }
 
     fn sub_constant_range(&mut self, value: Value, c: u32, block: Block) -> Range {
@@ -943,6 +871,54 @@ fn apply_rewrite(func: &mut Function, rewrite: Rewrite) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn structural_ranges_keep_only_constant_subtraction() {
+        // Memory-free coverage of the deliberately narrow structural rules.
+        let mut func = Function::new();
+        func.signature
+            .params
+            .push(ir::AbiParam::new(ir::types::I32));
+        let block = func.dfg.make_block();
+        let input = func.dfg.append_block_param(block, ir::types::I32);
+        let mut pos = FuncCursor::new(&mut func);
+        pos.insert_block(block);
+        let zero = pos.ins().iconst(ir::types::I32, 0);
+        let one = pos.ins().iconst(ir::types::I32, 1);
+        let negative_one = pos.ins().iconst(ir::types::I32, -1);
+        let twenty = pos.ins().iconst(ir::types::I32, 20);
+        let mask = pos.ins().iconst(ir::types::I32, 7);
+        let bounded = pos.ins().band(input, mask);
+        let condition = pos.ins().icmp(IntCC::Equal, input, zero);
+        let full = (0, u64::from(u32::MAX));
+        let cases = [
+            (bounded, (0, 7)),
+            (pos.ins().isub(twenty, one), (19, 19)),
+            (pos.ins().iadd(twenty, negative_one), (19, 19)),
+            (pos.ins().iadd(negative_one, twenty), (19, 19)),
+            (pos.ins().isub(zero, one), full),
+            (pos.ins().iadd(zero, negative_one), full),
+            (pos.ins().iadd(twenty, bounded), full),
+            (pos.ins().iadd(bounded, one), full),
+            (pos.ins().isub(twenty, bounded), full),
+            (pos.ins().bor(bounded, one), full),
+            (pos.ins().ishl(bounded, one), full),
+            (pos.ins().ushr(input, twenty), full),
+            (pos.ins().select(condition, twenty, one), full),
+            (pos.ins().select_spectre_guard(condition, twenty, one), full),
+        ];
+        pos.ins().return_(&[]);
+
+        let flags = cranelift_codegen::settings::Flags::new(cranelift_codegen::settings::builder());
+        cranelift_codegen::verify_function(&func, &flags).unwrap();
+        let cfg = ControlFlowGraph::with_function(&func);
+        let domtree = DominatorTree::with_function(&func, &cfg);
+        let mut ranges = RangeAnalysis::new(&func, &cfg, &domtree);
+        for (value, expected) in cases {
+            let range = ranges.range_at(value, block);
+            assert_eq!((range.min, range.max), expected, "range of {value}");
+        }
+    }
 
     // These graphs contain only comparisons, branches, and returns. Exercise
     // the proof itself without constructing native memory accesses.

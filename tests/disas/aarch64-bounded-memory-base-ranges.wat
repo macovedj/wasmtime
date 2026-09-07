@@ -4,8 +4,8 @@
 (module
   (memory 1)
 
-  ;; The branch proves `index <= 2046`. Range propagation through the addition
-  ;; must then prove that `index + 1 <= 2047`.
+  ;; Although the branch proves `index <= 2046`, general addition is outside
+  ;; this pass's structural range analysis. Retain the original address form.
   (func $load_through_add
     (param $base i32)
     (param $index i32)
@@ -78,34 +78,37 @@
 ;;       mov     x29, sp
 ;;       ldur    x16, [x2, #8]
 ;;       ldur    x16, [x16, #0x18]
-;;       add     x16, x16, #0x20
+;;       add     x16, x16, #0x30
 ;;       cmp     sp, x16
-;;       b.lo    #0x74
-;;   1c: stp     x19, x20, [sp, #-0x10]!
-;;       mov     x20, x5
+;;       b.lo    #0x80
+;;   1c: str     x21, [sp, #-0x10]!
+;;       stp     x19, x20, [sp, #-0x10]!
+;;       mov     x21, x5
 ;;       ldr     x13, [x2, #0x40]
 ;;       mov     w14, w4
 ;;       mov     x5, #0x2000
 ;;       add     x14, x14, #2, lsl #12
 ;;       cmp     x14, x13
-;;       b.hi    #0x78
-;;   3c: ldr     x15, [x2, #0x38]
-;;       add     x19, x15, w4, uxtw
+;;       b.hi    #0x84
+;;   40: ldr     x19, [x2, #0x38]
+;;       add     x3, x19, w4, uxtw
+;;       mov     x20, x4
 ;;       mov     x4, x6
-;;       mov     x3, x19
-;;       bl      #0x200
-;;   50: mov     x5, x20
+;;       bl      #0x220
+;;   54: mov     x5, x21
 ;;       cmp     w5, #0x7ff
-;;       b.hs    #0x7c
-;;   5c: add     w0, w5, #1
-;;       and     w0, w0, #0x7ff
-;;       ldr     w2, [x19, w0, uxtw #2]
+;;       b.hs    #0x88
+;;   60: add     w0, w5, #1
+;;       mov     x4, x20
+;;       add     w0, w4, w0, lsl #2
+;;       ldr     w2, [x19, w0, uxtw]
 ;;       ldp     x19, x20, [sp], #0x10
+;;       ldr     x21, [sp], #0x10
 ;;       ldp     x29, x30, [sp], #0x10
 ;;       ret
-;;   74: udf     #0xc11f
-;;   78: udf     #0xc11f
-;;   7c: udf     #0xc11f
+;;   80: udf     #0xc11f
+;;   84: udf     #0xc11f
+;;   88: udf     #0xc11f
 ;;
 ;; wasm[0]::function[1]::load_through_decreasing_loop:
 ;;       stp     x29, x30, [sp, #-0x10]!
@@ -114,29 +117,29 @@
 ;;       ldur    x16, [x16, #0x18]
 ;;       add     x16, x16, #0x20
 ;;       cmp     sp, x16
-;;       b.lo    #0xf8
-;;   9c: str     x19, [sp, #-0x10]!
+;;       b.lo    #0x118
+;;   bc: str     x19, [sp, #-0x10]!
 ;;       mov     x3, x5
 ;;       ldr     x0, [x2, #0x40]
 ;;       mov     w1, w4
 ;;       mov     x5, #0x2000
 ;;       add     x1, x1, #2, lsl #12
 ;;       cmp     x1, x0
-;;       b.hi    #0xfc
-;;   bc: ldr     x0, [x2, #0x38]
+;;       b.hi    #0x11c
+;;   dc: ldr     x0, [x2, #0x38]
 ;;       add     x19, x0, w4, uxtw
 ;;       mov     x4, x3
 ;;       mov     x3, x19
-;;       bl      #0x200
-;;   d0: mov     w13, #0x800
+;;       bl      #0x220
+;;   f0: mov     w13, #0x800
 ;;       mov     w2, #0
 ;;       sub     w13, w13, #1
 ;;       and     w0, w13, #0x7ff
 ;;       ldr     w0, [x19, w0, uxtw #2]
 ;;       add     w2, w2, w0
-;;       cbnz    w13, #0xd8
-;;   ec: ldr     x19, [sp], #0x10
+;;       cbnz    w13, #0xf8
+;;  10c: ldr     x19, [sp], #0x10
 ;;       ldp     x29, x30, [sp], #0x10
 ;;       ret
-;;   f8: udf     #0xc11f
-;;   fc: udf     #0xc11f
+;;  118: udf     #0xc11f
+;;  11c: udf     #0xc11f
