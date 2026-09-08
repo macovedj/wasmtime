@@ -47,4 +47,24 @@ __attribute__((weak)) extern void __unw_add_dynamic_fde();
 bool VERSIONED_SYMBOL(wasmtime_using_libunwind)() {
   return __unw_add_dynamic_fde != NULL;
 }
+
+__attribute__((weak)) extern void
+__unw_add_dynamic_eh_frame_section(uintptr_t);
+__attribute__((weak)) extern void
+__unw_remove_dynamic_eh_frame_section(uintptr_t);
+
+// Older libunwind versions do not provide these entry points. Require the
+// matched pair before registering so that teardown uses the same grouping.
+bool VERSIONED_SYMBOL(wasmtime_register_eh_frame_section)(const uint8_t *section) {
+  if (__unw_add_dynamic_eh_frame_section == NULL ||
+      __unw_remove_dynamic_eh_frame_section == NULL) {
+    return false;
+  }
+  __unw_add_dynamic_eh_frame_section((uintptr_t)section);
+  return true;
+}
+
+void VERSIONED_SYMBOL(wasmtime_deregister_eh_frame_section)(const uint8_t *section) {
+  __unw_remove_dynamic_eh_frame_section((uintptr_t)section);
+}
 #endif
