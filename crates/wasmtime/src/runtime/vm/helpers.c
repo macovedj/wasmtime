@@ -58,20 +58,44 @@ bool VERSIONED_SYMBOL(wasmtime_using_libunwind)() {
 // these optional APIs up at runtime so older SDKs can still build Wasmtime.
 // Cache the pair: registration may happen concurrently on multiple threads.
 typedef void (*unwind_section_fn)(uintptr_t);
+extern void __register_frame(const void *);
+extern void __deregister_frame(const void *);
 static unwind_section_fn add_eh_frame_section;
 static unwind_section_fn remove_eh_frame_section;
 static pthread_once_t unwind_section_once = PTHREAD_ONCE_INIT;
 
 static void load_unwind_section_api(void) {
-  // Use the system unwinder, as with macOS's __register_frame import. Keep the
-  // handle open for the lifetime of the cached function pointers.
-  void *lib = dlopen("/usr/lib/system/libunwind.dylib", RTLD_LAZY | RTLD_LOCAL);
+  // An embedder can link its own libunwind. Register sections with the same
+  // provider as the individual-FDE API, not necessarily the system library.
+  Dl_info info = {0};
+  if (dladdr((void *)__register_frame, &info) == 0 || info.dli_fname == NULL)
+    return;
+
+  // Do not pick up missing APIs from a dependency with a separate registry.
+  void *lib = dlopen(info.dli_fname, RTLD_LAZY | RTLD_LOCAL | RTLD_FIRST);
   if (lib == NULL)
     return;
-  add_eh_frame_section = (unwind_section_fn)dlsym(
+
+  // Library search overrides or interposition can change what dlopen finds.
+  // If it does not provide our linked pair, keep the individual-FDE fallback.
+  if (dlsym(lib, "__register_frame") != (void *)__register_frame ||
+      dlsym(lib, "__deregister_frame") != (void *)__deregister_frame) {
+    dlclose(lib);
+    return;
+  }
+
+  unwind_section_fn add = (unwind_section_fn)dlsym(
       lib, "__unw_add_dynamic_eh_frame_section");
-  remove_eh_frame_section = (unwind_section_fn)dlsym(
+  unwind_section_fn remove = (unwind_section_fn)dlsym(
       lib, "__unw_remove_dynamic_eh_frame_section");
+  if (add == NULL || remove == NULL) {
+    dlclose(lib);
+    return;
+  }
+
+  // Keep the handle open for the lifetime of the cached function pointers.
+  add_eh_frame_section = add;
+  remove_eh_frame_section = remove;
 }
 #else
 __attribute__((weak)) extern void
