@@ -6,7 +6,12 @@ use core::ptr::NonNull;
 
 /// Represents a registration of function unwind information for System V ABI.
 pub struct UnwindRegistration {
-    registrations: TryVec<SendSyncPtr<u8>>,
+    registrations: Registrations,
+}
+
+enum Registrations {
+    Frames(TryVec<SendSyncPtr<u8>>),
+    LibunwindSection(SendSyncPtr<u8>),
 }
 
 cfg_select! {
@@ -23,6 +28,10 @@ cfg_select! {
         unsafe extern "C" fn wasmtime_using_libunwind() -> bool {
             false
         }
+        unsafe extern "C" fn wasmtime_register_eh_frame_section(_: *const u8) -> bool {
+            false
+        }
+        unsafe extern "C" fn wasmtime_deregister_eh_frame_section(_: *const u8) {}
     }
     _ => {
         unsafe extern "C" {
@@ -31,6 +40,10 @@ cfg_select! {
             fn __deregister_frame(fde: *const u8);
             #[wasmtime_versioned_export_macros::versioned_link]
             fn wasmtime_using_libunwind() -> bool;
+            #[wasmtime_versioned_export_macros::versioned_link]
+            fn wasmtime_register_eh_frame_section(section: *const u8) -> bool;
+            #[wasmtime_versioned_export_macros::versioned_link]
+            fn wasmtime_deregister_eh_frame_section(section: *const u8);
         }
     }
 }
@@ -82,6 +95,17 @@ impl UnwindRegistration {
         let mut registrations = TryVec::new();
         unsafe {
             if using_libunwind() {
+                // Register a whole section when supported. Besides avoiding one
+                // registration call per FDE, this groups the FDEs for removal:
+                // libunwind otherwise scans its cache once per individual FDE.
+                // Our .eh_frame sections have the required zero terminator.
+                if wasmtime_register_eh_frame_section(unwind_info) {
+                    let info = NonNull::new(unwind_info.cast_mut()).unwrap();
+                    return Ok(UnwindRegistration {
+                        registrations: Registrations::LibunwindSection(SendSyncPtr::new(info)),
+                    });
+                }
+
                 // For libunwind, `__register_frame` takes a pointer to a single
                 // FDE. Note that we subtract 4 from the length of unwind info since
                 // wasmtime-encode .eh_frame sections always have a trailing 32-bit
@@ -114,13 +138,22 @@ impl UnwindRegistration {
             }
         }
 
-        Ok(UnwindRegistration { registrations })
+        Ok(UnwindRegistration {
+            registrations: Registrations::Frames(registrations),
+        })
     }
 }
 
 impl Drop for UnwindRegistration {
     fn drop(&mut self) {
         unsafe {
+            let registrations = match &self.registrations {
+                Registrations::LibunwindSection(section) => {
+                    wasmtime_deregister_eh_frame_section(section.as_ptr());
+                    return;
+                }
+                Registrations::Frames(registrations) => registrations,
+            };
             // libgcc stores the frame entries as a linked list in decreasing
             // sort order based on the PC value of the registered entry.
             //
@@ -129,7 +162,7 @@ impl Drop for UnwindRegistration {
             //
             // To ensure that we just pop off the first element in the list upon
             // every deregistration, walk our list of registrations backwards.
-            for fde in self.registrations.iter().rev() {
+            for fde in registrations.iter().rev() {
                 __deregister_frame(fde.as_ptr());
             }
         }
