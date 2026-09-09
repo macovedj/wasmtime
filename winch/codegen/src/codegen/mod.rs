@@ -24,9 +24,9 @@ use wasmparser::{
 };
 use wasmtime_cranelift::{TRAP_BAD_SIGNATURE, TRAP_HEAP_MISALIGNED, TRAP_TABLE_OUT_OF_BOUNDS};
 use wasmtime_environ::{
-    DataIndex, ElemIndex, FUNCREF_INIT_BIT, FUNCREF_MASK, GlobalIndex, IndexType, MemoryIndex,
-    MemoryKind, MemoryTunables, PtrSize, TableIndex, Tunables, TypeIndex, WasmHeapType,
-    WasmValType, wasm_unsupported,
+    DataIndex, ElemIndex, FUNCREF_INIT_BIT, FUNCREF_MASK, FuelAction, GlobalIndex, IndexType,
+    MemoryIndex, MemoryKind, MemoryTunables, PtrSize, TableIndex, Tunables, TypeIndex,
+    WasmHeapType, WasmValType, wasm_unsupported,
 };
 
 mod context;
@@ -2371,23 +2371,9 @@ where
         // fuel cache.
         self.fuel_consumed += self.tunables.operator_cost.cost(op);
 
-        match op {
-            Operator::Unreachable
-            | Operator::Loop { .. }
-            | Operator::If { .. }
-            | Operator::Else { .. }
-            | Operator::Br { .. }
-            | Operator::BrIf { .. }
-            | Operator::BrTable { .. }
-            | Operator::End
-            | Operator::Return
-            | Operator::CallIndirect { .. }
-            | Operator::Call { .. }
-            | Operator::ReturnCall { .. }
-            | Operator::ReturnCallIndirect { .. }
-            | Operator::Throw { .. }
-            | Operator::ThrowRef => self.emit_fuel_increment(),
-            _ => Ok(()),
+        match wasmtime_environ::fuel_before_op(op) {
+            FuelAction::Accumulate => Ok(()),
+            FuelAction::Increment | FuelAction::IncrementAndSave => self.emit_fuel_increment(),
         }
     }
 

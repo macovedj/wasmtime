@@ -36,11 +36,11 @@ use wasmtime_core::math::f64_cvt_to_int_bounds;
 use wasmtime_environ::{
     BuiltinFunctionIndex, ComponentPC, ConstExpr, ConstOp, DataIndex, DefinedFuncIndex,
     DefinedGlobalIndex, DefinedTableIndex, ElemIndex, EngineOrModuleTypeIndex, FactInlineIntrinsic,
-    FrameStateSlotBuilder, FrameValType, FuncIndex, FuncKey, GlobalConstValue, GlobalIndex,
-    IndexType, KnownFunc, KnownGlobal, Memory, MemoryIndex, MemoryInit, MemorySegmentOffset,
-    MemoryTunables, Module, ModuleInternedTypeIndex, ModuleTranslation, ModuleTypesBuilder,
-    PassiveElemIndex, RuntimeDataIndex, Table, TableIndex, TableInitialValue, TableSegment,
-    TableSegmentElements, TagIndex, Tunables, TypeConvert, TypeIndex, VMOffsets,
+    FrameStateSlotBuilder, FrameValType, FuelAction, FuncIndex, FuncKey, GlobalConstValue,
+    GlobalIndex, IndexType, KnownFunc, KnownGlobal, Memory, MemoryIndex, MemoryInit,
+    MemorySegmentOffset, MemoryTunables, Module, ModuleInternedTypeIndex, ModuleTranslation,
+    ModuleTypesBuilder, PassiveElemIndex, RuntimeDataIndex, Table, TableIndex, TableInitialValue,
+    TableSegment, TableSegmentElements, TagIndex, Tunables, TypeConvert, TypeIndex, VMOffsets,
     WasmCompositeInnerType, WasmFuncType, WasmHeapTopType, WasmHeapType, WasmRefType, WasmResult,
     WasmStorageType, WasmValType,
 };
@@ -558,78 +558,13 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
 
         self.fuel_consumed += self.tunables.operator_cost.cost(op);
 
-        match op {
-            // Exiting a function (via a return or unreachable) or otherwise
-            // entering a different function (via a call) means that we need to
-            // update the fuel consumption in `VMStoreContext` because we're
-            // about to move control out of this function itself and the fuel
-            // may need to be read.
-            //
-            // Before this we need to update the fuel counter from our own cost
-            // leading up to this function call, and then we can store
-            // `self.fuel_var` into `VMStoreContext`.
-            Operator::Unreachable
-            | Operator::Return
-            | Operator::CallIndirect { .. }
-            | Operator::Call { .. }
-            | Operator::ReturnCall { .. }
-            | Operator::ReturnCallRef { .. }
-            | Operator::ReturnCallIndirect { .. }
-            | Operator::Throw { .. } | Operator::ThrowRef => {
+        match wasmtime_environ::fuel_before_op(op) {
+            FuelAction::Accumulate => {}
+            FuelAction::Increment => self.fuel_increment_var(builder),
+            FuelAction::IncrementAndSave => {
                 self.fuel_increment_var(builder);
                 self.fuel_save_from_var(builder);
             }
-
-            // To ensure all code preceding a loop is only counted once we
-            // update the fuel variable on entry.
-            Operator::Loop { .. }
-
-            // Entering into an `if` block means that the edge we take isn't
-            // known until runtime, so we need to update our fuel consumption
-            // before we take the branch.
-            | Operator::If { .. }
-
-            // Control-flow instructions mean that we're moving to the end/exit
-            // of a block somewhere else. That means we need to update the fuel
-            // counter since we're effectively terminating our basic block.
-            | Operator::Br { .. }
-            | Operator::BrIf { .. }
-            | Operator::BrTable { .. }
-            | Operator::BrOnNull { .. }
-            | Operator::BrOnNonNull { .. }
-            | Operator::BrOnCast { .. }
-            | Operator::BrOnCastFail { .. }
-
-            // Exiting a scope means that we need to update the fuel
-            // consumption because there are multiple ways to exit a scope and
-            // this is the only time we have to account for instructions
-            // executed so far.
-            | Operator::End
-
-            // This is similar to `end`, except that it's only the terminator
-            // for an `if` block. The same reasoning applies though in that we
-            // are terminating a basic block and need to update the fuel
-            // variable.
-            | Operator::Else => self.fuel_increment_var(builder),
-
-            // This is a normal instruction where the fuel is buffered to later
-            // get added to `self.fuel_var`.
-            //
-            // Note that we generally ignore instructions which may trap and
-            // therefore result in exiting a block early. Current usage of fuel
-            // means that it's not too important to account for a precise amount
-            // of fuel consumed but rather "close to the actual amount" is good
-            // enough. For 100% precise counting, however, we'd probably need to
-            // not only increment but also save the fuel amount more often
-            // around trapping instructions. (see the `unreachable` instruction
-            // case above)
-            //
-            // Note that `Block` is specifically omitted from incrementing the
-            // fuel variable. Control flow entering a `block` is unconditional
-            // which means it's effectively executing straight-line code. We'll
-            // update the counter when exiting a block, but we shouldn't need to
-            // do so upon entering a block.
-            _ => {}
         }
     }
 
