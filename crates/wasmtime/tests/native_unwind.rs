@@ -94,14 +94,22 @@ fn native_unwind_sections_survive_non_lifo_removal() -> Result<()> {
     Ok(())
 }
 
-// The system unwinder currently stops before reaching the guest on aarch64,
-// including without bulk registration. Keep this check on x86-64, where native
-// stack walking traverses the host/guest transition.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn native_unwind_walks_nested_wasm_frames() -> Result<()> {
     use std::ffi::c_void;
     use wasmtime::{Caller, Func, Inlining, Instance, Store, Strategy};
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        // The process-ABI fix covers ordinary arm64 executables. Native walks
+        // with authentication active in arm64e processes remain separate.
+        // SAFETY: dyld image zero is the process's permanently mapped executable.
+        let header = unsafe { &*mach2::dyld::_dyld_get_image_header(0) };
+        if header.cpusubtype as u32 & 0x00ff_ffff == 2 {
+            return Ok(());
+        }
+    }
 
     let _guard = TEST_LOCK.lock().unwrap();
 
