@@ -1025,6 +1025,64 @@ jobs:
     - run: python3 ./ci/run-tests.py --locked ${{ matrix.bucket }}
       if: runner.os != 'Windows'
 
+  test_llvm_libunwind:
+    name: Test Linux x86_64 with LLVM libunwind
+    needs: determine
+    if: needs.determine.outputs.run-full
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        submodules: true
+    - uses: ./.github/actions/install-rust
+    - uses: ./.github/actions/apt-get-install
+      with:
+        packages: libunwind-18
+    - name: Build native unwind tests
+      run: cargo test --locked -p wasmtime-cli --test all --no-run --message-format=json > test-artifacts.json
+    - name: Run with LLVM libunwind and verify bindings
+      shell: bash
+      run: |
+        test_binary=$(jq -ers '
+          [.[] | select(.reason == "compiler-artifact" and .target.name == "all"
+                        and .profile.test and .executable != null) | .executable]
+          | if length == 1 then .[0] else error("expected one test executable") end
+        ' test-artifacts.json)
+        unwinder=$(readlink -f /usr/lib/llvm-18/lib/libunwind.so.1)
+        test -f "$unwinder"
+        # Scope preloading to the test process and its children, not Cargo/rustc.
+        if ! env LD_PRELOAD="$unwinder" LD_BIND_NOW=1 LD_DEBUG=bindings \
+            "$test_binary" module::native_unwind:: --nocapture \
+            > native-unwind.stdout 2> native-unwind.bindings; then
+          cat native-unwind.stdout
+          tail -100 native-unwind.bindings
+          exit 1
+        fi
+        cat native-unwind.stdout
+        grep -F '2 passed; 0 failed;' native-unwind.stdout
+        python3 - "$test_binary" "$unwinder" <<'PY'
+        import pathlib
+        import sys
+
+        binary, unwinder = sys.argv[1:]
+        lines = pathlib.Path("native-unwind.bindings").read_text().splitlines()
+        bindings = [line for line in lines
+                    if f"binding file {binary} [0] to {unwinder} [0]:" in line]
+        for symbol in ("__register_frame", "__deregister_frame", "_Unwind_Find_FDE",
+                       "_Unwind_Backtrace", "__unw_add_dynamic_fde",
+                       "__unw_add_dynamic_eh_frame_section",
+                       "__unw_remove_dynamic_eh_frame_section"):
+            matches = [line for line in bindings if f"symbol `{symbol}'" in line]
+            if not matches:
+                raise SystemExit(f"test did not bind {symbol} to {unwinder}")
+            print(matches[0])
+        PY
+    - uses: actions/upload-artifact@v6
+      if: always()
+      with:
+        name: llvm-libunwind-test-logs
+        path: native-unwind.*
+
   # Test `wasmtime-wasi-nn` in its own job, as not all of its backends are
   # compatible with all targets, and each must be tested separately anyways.
   test_wasi_nn:
@@ -1459,6 +1517,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - test
+      - test_llvm_libunwind
       - test_capi
       - test_debug_dwarf
       - test_fuzzing
