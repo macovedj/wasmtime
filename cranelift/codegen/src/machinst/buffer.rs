@@ -280,6 +280,10 @@ pub struct MachBuffer<I: VCodeInst> {
     call_sites: SmallVec<[MachCallSite; 16]>,
     /// Any patchable call site locations.
     patchable_call_sites: SmallVec<[MachPatchableCallSite; 16]>,
+    /// Whether normal returns preserve the incoming SP according to the ABI.
+    stack_pointer_preserved: Option<bool>,
+    /// Alternatives selected once the direct callees' behavior is known.
+    stack_recovery_patches: Vec<MachStackRecoveryPatch>,
     /// Any exception-handler records referred to at call sites.
     exception_handlers: SmallVec<[MachExceptionHandler; 16]>,
     /// Any source location mappings referring to this code.
@@ -371,6 +375,8 @@ impl MachBufferFinalized<Stencil> {
             traps: self.traps,
             call_sites: self.call_sites,
             patchable_call_sites: self.patchable_call_sites,
+            stack_pointer_preserved: self.stack_pointer_preserved,
+            stack_recovery_patches: self.stack_recovery_patches,
             exception_handlers: self.exception_handlers,
             srclocs: self
                 .srclocs
@@ -408,6 +414,11 @@ pub struct MachBufferFinalized<T: CompilePhase> {
     pub(crate) call_sites: SmallVec<[MachCallSite; 16]>,
     /// Any patchable call site locations referring to this code.
     pub(crate) patchable_call_sites: SmallVec<[MachPatchableCallSite; 16]>,
+    /// `Some(true)` proves that this function returns with the ABI-expected SP.
+    /// `None` is unknown; consumers must keep conservative recovery in that case.
+    pub stack_pointer_preserved: Option<bool>,
+    /// Fixed-size recovery alternatives for statically known direct callees.
+    pub stack_recovery_patches: Vec<MachStackRecoveryPatch>,
     /// Any exception-handler records referred to at call sites.
     pub(crate) exception_handlers: SmallVec<[FinalizedMachExceptionHandler; 16]>,
     /// Any source location mappings referring to this code.
@@ -508,6 +519,8 @@ impl<I: VCodeInst> MachBuffer<I> {
             traps: SmallVec::new(),
             call_sites: SmallVec::new(),
             patchable_call_sites: SmallVec::new(),
+            stack_pointer_preserved: None,
+            stack_recovery_patches: Vec::new(),
             exception_handlers: SmallVec::new(),
             srclocs: SmallVec::new(),
             debug_tags: vec![],
@@ -617,6 +630,47 @@ impl<I: VCodeInst> MachBuffer<I> {
         assert!(!self.open_patchable, "Patchable regions may not be nested");
         self.open_patchable = true;
         OpenPatchRegion(usize::try_from(self.cur_offset()).unwrap())
+    }
+
+    /// Record whether this function returns with its ABI-expected SP.
+    /// Producers must account for every emitted return path, including tail jumps.
+    pub fn set_stack_pointer_preserved(&mut self, preserved: bool) {
+        self.stack_pointer_preserved = Some(preserved);
+    }
+
+    /// Finish a conservative recovery sequence and retain its ordinary-cleanup
+    /// alternative. Both sequences must be relocation-free and have identical
+    /// logical stack effects; only the conservative one tolerates a changed SP.
+    /// The shorter sequence is padded so later selection cannot move code.
+    pub fn end_stack_recovery(
+        &mut self,
+        open: OpenPatchRegion,
+        callee: crate::ir::UserExternalNameRef,
+        mut replacement: Vec<u8>,
+    ) {
+        let len = (self.data.len() - open.0).max(replacement.len());
+        let nops = if self.data.len() - open.0 != replacement.len() {
+            I::gen_nop_units()
+        } else {
+            Vec::new()
+        };
+        let mut padding = len - (self.data.len() - open.0);
+        while padding > 0 {
+            let nop = nops.iter().rev().find(|n| n.len() <= padding).unwrap();
+            self.put_data(nop);
+            padding -= nop.len();
+        }
+        while replacement.len() < len {
+            let remaining = len - replacement.len();
+            let nop = nops.iter().rev().find(|n| n.len() <= remaining).unwrap();
+            replacement.extend_from_slice(nop);
+        }
+        let region = self.end_patchable(open);
+        self.stack_recovery_patches.push(MachStackRecoveryPatch {
+            range: region.range,
+            callee,
+            replacement,
+        });
     }
 
     /// End a region of patchable code, yielding a [`PatchRegion`] value that
@@ -1669,6 +1723,8 @@ impl<I: VCodeInst> MachBuffer<I> {
             traps: self.traps,
             call_sites: self.call_sites,
             patchable_call_sites: self.patchable_call_sites,
+            stack_pointer_preserved: self.stack_pointer_preserved,
+            stack_recovery_patches: self.stack_recovery_patches,
             exception_handlers: finalized_exception_handlers,
             srclocs,
             debug_tags: self.debug_tags,
@@ -2304,6 +2360,22 @@ pub struct MachPatchableCallSite {
     pub len: u32,
 }
 
+/// A post-call sequence that may be replaced if the direct callee is proven
+/// to preserve the ABI-expected stack pointer. The replacement includes padding.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    feature = "enable-serde",
+    derive(serde_derive::Serialize, serde_derive::Deserialize)
+)]
+pub struct MachStackRecoveryPatch {
+    /// Function-relative byte range of the conservative sequence.
+    pub range: Range<usize>,
+    /// Direct callee, resolved by the owner of the compiled function.
+    pub callee: crate::ir::UserExternalNameRef,
+    /// Ordinary cleanup, padded to exactly the length of `range`.
+    pub replacement: Vec<u8>,
+}
+
 /// A source-location mapping resulting from a compilation.
 #[derive(PartialEq, Debug, Clone)]
 #[cfg_attr(
@@ -2586,6 +2658,38 @@ mod test {
         let flags = settings::Flags::new(settings::builder());
         let isa_flags = aarch64::settings::Flags::new(&flags, &aarch64::settings::builder());
         EmitInfo::new(flags, isa_flags)
+    }
+
+    #[test]
+    fn stack_recovery_metadata_survives_finalization() {
+        for (conservative_len, alternative_len) in [(4, 0), (4, 8), (8, 4)] {
+            let mut buf = MachBuffer::<Inst>::new();
+            assert_eq!(buf.stack_pointer_preserved, None);
+            buf.set_stack_pointer_preserved(true);
+            buf.put4(0xaaaaaaaa);
+            let open = buf.start_patchable();
+            buf.put_data(&vec![0xbb; conservative_len]);
+            let callee = UserExternalNameRef::new(7);
+            buf.end_stack_recovery(open, callee, vec![0xcc; alternative_len]);
+            let expected_len = conservative_len.max(alternative_len);
+            assert_eq!(buf.cur_offset() as usize, 4 + expected_len);
+            buf.put4(0xdddddddd);
+            buf.set_stack_pointer_preserved(false);
+            let finalized = buf
+                .finish(&Default::default(), &mut Default::default())
+                .apply_base_srcloc(Default::default());
+            assert_eq!(finalized.stack_pointer_preserved, Some(false));
+            let patch = &finalized.stack_recovery_patches[0];
+            assert_eq!(patch.callee, callee);
+            assert_eq!(patch.range, 4..4 + expected_len);
+            assert_eq!(patch.replacement.len(), expected_len);
+            assert_eq!(
+                &patch.replacement[..alternative_len],
+                vec![0xcc; alternative_len]
+            );
+            assert_eq!(&finalized.data()[..4], &[0xaa; 4]);
+            assert_eq!(&finalized.data()[patch.range.end..], &[0xdd; 4]);
+        }
     }
 
     #[test]

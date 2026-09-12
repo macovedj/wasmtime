@@ -1189,6 +1189,27 @@ impl Assembler {
         self.emit(Inst::External { inst });
     }
 
+    /// Encode ordinary cleanup independently of the conservative code buffer.
+    pub fn stack_cleanup_bytes(bytes: u32, min_len: usize) -> Vec<u8> {
+        let mut code = Vec::new();
+        if bytes != 0 {
+            let dst = pair_gpr(writable!(super::regs::rsp()));
+            // Match `add_ir`/`free_stack`; do not mix an instruction-encoding
+            // optimization into the deferred-recovery experiment.
+            let inst: asm::Inst<cranelift_codegen::isa::x64::external::CraneliftRegisters> =
+                asm::inst::addq_mi_sxl::new(dst, bytes as i32).into();
+            inst.encode(&mut code);
+        }
+        // Use one multibyte NOP where possible, not one instruction per byte.
+        while code.len() < min_len {
+            let Inst::External { inst } = Inst::gen_nop(min_len - code.len()) else {
+                unreachable!()
+            };
+            inst.encode(&mut code);
+        }
+        code
+    }
+
     /// Add immediate and register.
     pub fn add_ir(&mut self, imm: i32, dst: WritableReg, size: OperandSize) {
         let dst = pair_gpr(dst);

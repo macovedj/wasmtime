@@ -259,7 +259,6 @@ fn prepare_translation(
     // representation where possible, to enable table lazy init.
     translation.finalize_table_init(engine.tunables(), types);
 
-    compiler.prepare_module(translation)?;
     Ok(())
 }
 

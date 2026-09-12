@@ -1437,6 +1437,14 @@ pub(crate) trait MacroAssembler {
         self.free_stack(bytes)
     }
 
+    /// Emit conservative recovery for a local direct call, recording an
+    /// ordinary-cleanup alternative for selection after module compilation.
+    fn restore_stack_after_direct_call(
+        &mut self,
+        bytes: u32,
+        callee: UserExternalNameRef,
+    ) -> Result<()>;
+
     /// Reset the stack pointer to the given offset;
     ///
     /// Used to reset the stack pointer to a given offset

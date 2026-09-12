@@ -136,6 +136,20 @@ impl CompiledFunction {
         }
     }
 
+    /// Resolve the direct targets of deferred stack-recovery alternatives.
+    pub fn stack_recovery_patches(
+        &self,
+    ) -> impl Iterator<Item = (wasmtime_environ::FuncKey, Range<usize>, &[u8])> {
+        self.buffer.stack_recovery_patches.iter().map(|patch| {
+            let name = &self.name_map[patch.callee];
+            (
+                wasmtime_environ::FuncKey::from_raw_parts(name.namespace, name.index),
+                patch.range.clone(),
+                patch.replacement.as_slice(),
+            )
+        })
+    }
+
     /// Returns an iterator to the function's relocation information.
     pub fn relocations(&self) -> impl Iterator<Item = Relocation> + '_ {
         self.buffer

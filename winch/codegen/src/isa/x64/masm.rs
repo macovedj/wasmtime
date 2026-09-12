@@ -108,6 +108,7 @@ impl Masm for MacroAssembler {
     type ABI = X64ABI;
 
     fn frame_setup(&mut self) -> Result<()> {
+        self.asm.buffer_mut().set_stack_pointer_preserved(true);
         let frame_pointer = rbp();
         let stack_pointer = rsp();
 
@@ -215,6 +216,22 @@ impl Masm for MacroAssembler {
             .add_ir(bytes as i32, writable!(rsp()), OperandSize::S64);
         self.decrement_sp(bytes);
 
+        Ok(())
+    }
+
+    fn restore_stack_after_direct_call(
+        &mut self,
+        bytes: u32,
+        callee: cranelift_codegen::ir::UserExternalNameRef,
+    ) -> Result<()> {
+        let start = self.asm.buffer_mut().cur_offset();
+        let open = self.asm.buffer_mut().start_patchable();
+        self.restore_stack_after_call(bytes)?;
+        let len = (self.asm.buffer_mut().cur_offset() - start) as usize;
+        let replacement = Assembler::stack_cleanup_bytes(bytes, len);
+        self.asm
+            .buffer_mut()
+            .end_stack_recovery(open, callee, replacement);
         Ok(())
     }
 
@@ -461,6 +478,7 @@ impl Masm for MacroAssembler {
     }
 
     fn tail_jump(&mut self, callee: CalleeKind) {
+        self.asm.buffer_mut().set_stack_pointer_preserved(false);
         match callee {
             CalleeKind::Indirect(reg) => self.asm.tail_jump_with_reg(reg),
             CalleeKind::Direct(name) => self.asm.tail_jump_with_name(name),

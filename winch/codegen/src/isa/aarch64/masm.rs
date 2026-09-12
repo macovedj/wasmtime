@@ -148,6 +148,7 @@ impl Masm for MacroAssembler {
     type ABI = Aarch64ABI;
 
     fn frame_setup(&mut self) -> Result<()> {
+        self.asm.buffer_mut().set_stack_pointer_preserved(true);
         let lr = regs::lr();
         let fp = regs::fp();
         let sp = regs::sp();
@@ -327,6 +328,25 @@ impl Masm for MacroAssembler {
             // `free_stack` updates x28 and synchronizes real SP.
             self.free_stack(bytes)?;
         }
+        Ok(())
+    }
+
+    fn restore_stack_after_direct_call(
+        &mut self,
+        bytes: u32,
+        callee: cranelift_codegen::ir::UserExternalNameRef,
+    ) -> Result<()> {
+        if bytes != 0 {
+            // Both paths already update x28 and synchronize architectural SP.
+            return self.free_stack(bytes);
+        }
+        // Flush any pending island before recording the patch's start.
+        self.asm.prepare_stack_recovery();
+        let open = self.asm.buffer_mut().start_patchable();
+        self.move_shadow_sp_to_sp();
+        self.asm
+            .buffer_mut()
+            .end_stack_recovery(open, callee, Vec::new());
         Ok(())
     }
 
@@ -602,6 +622,7 @@ impl Masm for MacroAssembler {
     }
 
     fn tail_jump(&mut self, callee: CalleeKind) {
+        self.asm.buffer_mut().set_stack_pointer_preserved(false);
         match callee {
             CalleeKind::Indirect(reg) => self.asm.tail_jump_with_reg(reg),
             CalleeKind::Direct(name) => self.asm.tail_jump_with_name(name),

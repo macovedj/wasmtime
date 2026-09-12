@@ -722,11 +722,21 @@ impl wasmtime_environ::Compiler for Compiler {
         }
 
         let mut breakpoint_table: Vec<(ModulePC, Range<u32>)> = Vec::new();
+        let mut stack_recovery_patches = Vec::new();
         let mut nop_units = None;
 
         let mut ret = Vec::with_capacity(funcs.len());
         for (i, (sym, _key, func)) in funcs.iter().enumerate() {
             let (sym_id, range) = builder.append_func(&sym, func, |idx| resolve_reloc(i, idx));
+            for (callee, patch, replacement) in func.stack_recovery_patches() {
+                let callee = funcs[resolve_reloc(i, callee)].2;
+                if callee.buffer.stack_pointer_preserved == Some(true) {
+                    let start = usize::try_from(range.start)? + patch.start;
+                    let end = usize::try_from(range.start)? + patch.end;
+                    assert_eq!(end - start, replacement.len());
+                    stack_recovery_patches.push((start..end, replacement));
+                }
+            }
             log::trace!("symbol id {sym_id:?} = {sym:?}");
 
             if self.tunables.generate_address_map {
@@ -784,6 +794,11 @@ impl wasmtime_environ::Compiler for Compiler {
         breakpoint_table.sort_by_key(|(wasm_pc, _text_range)| *wasm_pc);
 
         builder.finish(|text| {
+            // All functions are compiled now. Fixed-size replacement preserves
+            // branch targets, relocations, return PCs, and metadata offsets.
+            for (range, replacement) in stack_recovery_patches {
+                text[range].copy_from_slice(replacement);
+            }
             if !breakpoint_table.is_empty() {
                 let nop_units = nop_units.as_ref().unwrap();
                 let fill_with_nops = |mut slice: &mut [u8]| {

@@ -138,6 +138,15 @@ impl Assembler {
     }
 
     fn emit_with_island(&mut self, inst: Inst, needed_space: u32) {
+        self.ensure_space(needed_space);
+        inst.emit(&mut self.buffer, &self.emit_info, &mut self.emit_state);
+    }
+
+    pub fn prepare_stack_recovery(&mut self) {
+        self.ensure_space(Inst::worst_case_size());
+    }
+
+    fn ensure_space(&mut self, needed_space: u32) {
         if self.buffer.island_needed(needed_space) {
             let label = self.buffer.get_label();
             let jmp = Inst::Jump {
@@ -149,7 +158,6 @@ impl Assembler {
             self.buffer
                 .bind_label(label, self.emit_state.ctrl_plane_mut());
         }
-        inst.emit(&mut self.buffer, &self.emit_info, &mut self.emit_state);
     }
 
     /// Adds a constant to the constant pool, returning its address.
