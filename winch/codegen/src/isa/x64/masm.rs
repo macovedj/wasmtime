@@ -1048,6 +1048,47 @@ impl Masm for MacroAssembler {
         Ok(())
     }
 
+    fn epilogue(&mut self, locals_size: u32, stack_args_size: u32) -> Result<()> {
+        if stack_args_size == 0 {
+            self.free_stack(locals_size)?;
+            return self.frame_restore(0);
+        }
+
+        // At this boundary SP + locals_size == FP. Move the return address up
+        // by the argument-area size, then discard the frame and finish with a
+        // plain RET instead of an immediate-pop RET.
+        assert_eq!(self.sp_offset, locals_size);
+        let destination = stack_args_size.checked_add(8).unwrap();
+        let sp_destination = locals_size.checked_add(destination).unwrap();
+        self.with_scratch::<IntScratch, _>(|masm, scratch| {
+            // Use SP-relative addressing when all displacements and the ADD
+            // fit signed 8-bit encodings; use FP-relative addressing otherwise.
+            if let Ok(destination) = i8::try_from(sp_destination) {
+                let return_slot = locals_size.checked_add(8).unwrap();
+                masm.load_ptr(Address::offset(rsp(), return_slot), scratch.writable())?;
+                masm.store_ptr(scratch.inner(), Address::offset(rsp(), sp_destination))?;
+                masm.load_ptr(Address::offset(rsp(), locals_size), writable!(rbp()))?;
+                masm.asm.add_ir8(destination, writable!(rsp()));
+            } else {
+                masm.load_ptr(Address::offset(rbp(), 8), scratch.writable())?;
+                masm.store_ptr(scratch.inner(), Address::offset(rbp(), destination))?;
+                masm.asm.lea(
+                    &Address::offset(rbp(), destination),
+                    scratch.writable(),
+                    OperandSize::S64,
+                );
+                masm.load_ptr(Address::offset(rbp(), 0), writable!(rbp()))?;
+                masm.asm
+                    .mov_rr(scratch.inner(), writable!(rsp()), OperandSize::S64);
+            }
+            // Both paths finish reading the old frame before advancing SP.
+            masm.sp_offset = 0;
+            wasmtime_environ::error::Ok(())
+        })?;
+        self.asm.ret(0);
+        Ok(())
+    }
+
     fn frame_restore(&mut self, stack_args_size: u32) -> Result<()> {
         debug_assert_eq!(self.sp_offset, 0);
         self.asm.pop_r(writable!(rbp()));
