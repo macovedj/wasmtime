@@ -137,7 +137,7 @@ pub fn infer_native_flags(isa_builder: &mut dyn Configurable) -> Result<(), &'st
         {
             // Describing return addresses as signed when macOS has disabled
             // pointer authentication makes the system DWARF unwinder reject them.
-            if macos::pointer_authentication_enabled()? {
+            if macos::return_address_signing_enabled() {
                 isa_builder.enable("sign_return_address").unwrap();
             }
             // macOS enforces the use of the B key for return addresses.
