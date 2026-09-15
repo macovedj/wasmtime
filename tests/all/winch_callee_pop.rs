@@ -5,6 +5,47 @@ use wasmtime::*;
 
 use wasmtime_test_macros::wasmtime_test;
 
+#[wasmtime_test(strategies(only(Winch)))]
+#[cfg_attr(miri, ignore)]
+fn callee_pop_epilogue_boundary(config: &mut Config) -> Result<()> {
+    if !cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
+        return Ok(());
+    }
+    config.wasm_tail_call(false);
+    let engine = Engine::new(config)?;
+    // On x86 these land immediately below and above the compact-frame cutoff.
+    // Inline the fixture because this review-only branch omits disassembly files.
+    let module = Module::new(
+        &engine,
+        r#"(module
+          (func (export "no_stack_args") (result i64)
+            i64.const 42)
+          (func (export "compact") (param i64 i64 i64 i64 i64 i64 i64 i64) (result i64)
+            (local i64 i64 i64 i64)
+            local.get 0 local.get 7 i64.add)
+          (func (export "fallback") (param i64 i64 i64 i64 i64 i64 i64 i64) (result i64)
+            (local i64 i64 i64 i64 i64)
+            local.get 0 local.get 7 i64.add))"#,
+    )?;
+    let mut store = Store::new(&engine, ());
+    let instance = Instance::new(&mut store, &module, &[])?;
+    let no_args = instance.get_typed_func::<(), i64>(&mut store, "no_stack_args")?;
+    for name in ["compact", "fallback"] {
+        let f = instance
+            .get_typed_func::<(i64, i64, i64, i64, i64, i64, i64, i64), i64>(&mut store, name)?;
+        for seed in [-17, 0, 42] {
+            for _ in 0..10 {
+                assert_eq!(
+                    f.call(&mut store, (seed, 2, 3, 4, 5, 6, 7, seed + 8))?,
+                    2 * seed + 8
+                );
+                assert_eq!(no_args.call(&mut store, ())?, 42);
+            }
+        }
+    }
+    Ok(())
+}
+
 // Keep an operand live across each call and consume every argument and result.
 // This exercises combined padding/spill cleanup as well as the stack-result
 // path, where result movement must precede the final cleanup.
