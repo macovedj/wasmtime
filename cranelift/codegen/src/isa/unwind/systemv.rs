@@ -175,6 +175,24 @@ pub(crate) fn create_unwind_info_from_insts<MR: RegisterMapper<Reg>>(
     let mut clobber_offset_to_cfa = 0;
     for &(instruction_offset, ref inst) in insts {
         match inst {
+            UnwindInst::SystemV(inst) => {
+                use super::SystemVUnwindInst;
+                let map = |reg: crate::machinst::RealReg| {
+                    mr.map(reg.into())
+                        .map_err(CodegenError::RegisterMappingError)
+                };
+                let inst = match *inst {
+                    SystemVUnwindInst::RememberState => CallFrameInstruction::RememberState,
+                    SystemVUnwindInst::RestoreState => CallFrameInstruction::RestoreState,
+                    SystemVUnwindInst::DefineCfa { reg, offset } => {
+                        CallFrameInstruction::Cfa(map(reg)?, offset)
+                    }
+                    SystemVUnwindInst::SameValue { reg } => {
+                        CallFrameInstruction::SameValue(map(reg)?)
+                    }
+                };
+                instructions.push((instruction_offset, inst));
+            }
             &UnwindInst::PushFrameRegs {
                 offset_upward_to_caller_sp,
             } => {

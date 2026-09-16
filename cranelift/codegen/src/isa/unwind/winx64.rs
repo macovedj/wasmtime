@@ -244,8 +244,13 @@ pub(crate) fn create_unwind_info_from_insts<MR: RegisterMapper<crate::machinst::
     let mut frame_register_offset = 0;
     let mut max_unwind_offset = 0;
     for &(instruction_offset, ref inst) in insts {
+        // DWARF epilogue offsets can exceed the Windows prologue's u8 limit.
+        if matches!(inst, UnwindInst::SystemV(_)) {
+            continue;
+        }
         let instruction_offset = ensure_unwind_offset(instruction_offset)?;
         match inst {
+            UnwindInst::SystemV(_) => unreachable!(),
             &UnwindInst::PushFrameRegs { .. } => {
                 unwind_codes.push(UnwindCode::PushRegister {
                     instruction_offset,

@@ -39,7 +39,7 @@ use cranelift_codegen::{
     binemit::CodeOffset,
     ir::{MemFlagsData, RelSourceLoc, SourceLoc},
     isa::{
-        unwind::UnwindInst,
+        unwind::{SystemVUnwindInst, UnwindInst},
         x64::{AtomicRmwSeqOp, args::CC, settings as x64_settings},
     },
     settings,
@@ -1067,6 +1067,7 @@ impl Masm for MacroAssembler {
         assert_eq!(self.sp_offset, locals_size);
         let destination = stack_args_size.checked_add(8).unwrap();
         let sp_destination = locals_size.checked_add(destination).unwrap();
+        self.epilogue_unwind(SystemVUnwindInst::RememberState);
         self.with_scratch::<IntScratch, _>(|masm, scratch| {
             // Use SP-relative addressing when all displacements and the ADD
             // fit signed 8-bit encodings; use FP-relative addressing otherwise.
@@ -1075,6 +1076,12 @@ impl Masm for MacroAssembler {
                 masm.load_ptr(Address::offset(rsp(), return_slot), scratch.writable())?;
                 masm.store_ptr(scratch.inner(), Address::offset(rsp(), sp_destination))?;
                 masm.load_ptr(Address::offset(rsp(), locals_size), writable!(rbp()))?;
+                // RBP now belongs to the caller. The relocated return address
+                // is immediately below its post-cleanup SP (the new CFA).
+                masm.epilogue_cfa(rsp(), sp_destination.checked_add(8).unwrap())?;
+                masm.epilogue_unwind(SystemVUnwindInst::SameValue {
+                    reg: rbp().inner().into(),
+                });
                 masm.asm.add_ir8(destination, writable!(rsp()));
             } else {
                 masm.load_ptr(Address::offset(rbp(), 8), scratch.writable())?;
@@ -1085,21 +1092,35 @@ impl Masm for MacroAssembler {
                     OperandSize::S64,
                 );
                 masm.load_ptr(Address::offset(rbp(), 0), writable!(rbp()))?;
+                // The scratch register holds the address of the relocated
+                // return address until the next instruction installs SP.
+                masm.epilogue_cfa(scratch.inner(), 8)?;
+                masm.epilogue_unwind(SystemVUnwindInst::SameValue {
+                    reg: rbp().inner().into(),
+                });
                 masm.asm
                     .mov_rr(scratch.inner(), writable!(rsp()), OperandSize::S64);
             }
+            masm.epilogue_cfa(rsp(), 8)?;
             // Both paths finish reading the old frame before advancing SP.
             masm.sp_offset = 0;
             wasmtime_environ::error::Ok(())
         })?;
         self.asm.ret(0);
+        self.epilogue_unwind(SystemVUnwindInst::RestoreState);
         Ok(())
     }
 
     fn frame_restore(&mut self, stack_args_size: u32) -> Result<()> {
         debug_assert_eq!(self.sp_offset, 0);
+        self.epilogue_unwind(SystemVUnwindInst::RememberState);
         self.asm.pop_r(writable!(rbp()));
+        self.epilogue_cfa(rsp(), 8)?;
+        self.epilogue_unwind(SystemVUnwindInst::SameValue {
+            reg: rbp().inner().into(),
+        });
         self.asm.ret(u16::try_from(stack_args_size)?);
+        self.epilogue_unwind(SystemVUnwindInst::RestoreState);
         Ok(())
     }
 
@@ -3491,6 +3512,20 @@ impl Masm for MacroAssembler {
 }
 
 impl MacroAssembler {
+    fn epilogue_unwind(&mut self, inst: SystemVUnwindInst) {
+        if self.shared_flags.unwind_info() {
+            self.asm.unwind_inst(UnwindInst::SystemV(inst));
+        }
+    }
+
+    fn epilogue_cfa(&mut self, reg: Reg, offset: u32) -> Result<()> {
+        self.epilogue_unwind(SystemVUnwindInst::DefineCfa {
+            reg: reg.inner().into(),
+            offset: i32::try_from(offset)?,
+        });
+        Ok(())
+    }
+
     /// Create an x64 MacroAssembler.
     pub fn new(
         ptr_size: impl PtrSize,
@@ -3908,6 +3943,123 @@ impl MacroAssembler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cranelift_codegen::isa::unwind::{UnwindInfo, UnwindInfoKind};
+    use gimli::{BaseAddresses, CfaRule, RegisterRule, UnwindContext, UnwindSection, X86_64};
+
+    // Two epilogues and following code exercise remember/restore-state as well
+    // as the instruction boundaries where RBP and RSP change. The long body
+    // also catches accidentally treating DWARF offsets as Windows prologue offsets.
+    fn epilogue_fixture(
+        locals: u32,
+        args: u32,
+        epilogue_info: bool,
+    ) -> Result<(MachBufferFinalized, Vec<(u32, u32)>)> {
+        use settings::Configurable;
+        let mut builder = settings::builder();
+        builder.set("unwind_info", "true").unwrap();
+        let shared = settings::Flags::new(builder.clone());
+        let isa = x64_settings::Flags::new(&shared, &x64_settings::builder());
+        let mut masm = MacroAssembler::new(8u8, shared, isa)?;
+        masm.frame_setup()?;
+        masm.asm.unwind_inst(UnwindInst::DefineNewFrame {
+            offset_upward_to_caller_sp: 16,
+            offset_downward_to_clobbers: 0,
+        });
+        masm.reserve_stack(locals)?;
+        for _ in 0..100 {
+            masm.asm
+                .mov_rr(regs::rax(), writable!(regs::rax()), OperandSize::S64);
+        }
+        builder
+            .set("unwind_info", if epilogue_info { "true" } else { "false" })
+            .unwrap();
+        masm.shared_flags = settings::Flags::new(builder);
+        let mut epilogues = vec![];
+        for _ in 0..2 {
+            masm.sp_offset = locals;
+            let start = masm.asm.buffer_mut().cur_offset();
+            masm.epilogue(locals, args)?;
+            let end = masm.asm.buffer_mut().cur_offset();
+            epilogues.push((start, end));
+            masm.asm
+                .mov_rr(regs::rax(), writable!(regs::rax()), OperandSize::S64);
+        }
+        Ok((masm.finalize(None)?, epilogues))
+    }
+
+    #[test]
+    fn callee_pop_epilogue_unwind_rules() -> Result<()> {
+        use cranelift_codegen::isa::x64::{create_cie, emit_unwind_info};
+        use gimli::write::{Address as DwarfAddress, EhFrame, EndianVec, FrameTable};
+
+        for (locals, args) in [(0, 0), (48, 0), (96, 16), (103, 16), (104, 16), (512, 256)] {
+            let (code, epilogues) = epilogue_fixture(locals, args, true)?;
+            let (without, _) = epilogue_fixture(locals, args, false)?;
+            // Metadata must not change executable bytes or Windows unwind data.
+            assert_eq!(code.data(), without.data());
+            assert_eq!(
+                emit_unwind_info(&code, UnwindInfoKind::Windows).unwrap(),
+                emit_unwind_info(&without, UnwindInfoKind::Windows).unwrap(),
+            );
+            let Some(UnwindInfo::SystemV(info)) =
+                emit_unwind_info(&code, UnwindInfoKind::SystemV).unwrap()
+            else {
+                panic!("expected DWARF unwind info")
+            };
+            let mut table = FrameTable::default();
+            let cie = table.add_cie(create_cie());
+            table.add_fde(cie, info.to_fde(DwarfAddress::Constant(0)));
+            let mut bytes = EhFrame(EndianVec::new(gimli::LittleEndian));
+            table.write_eh_frame(&mut bytes).unwrap();
+            let bytes = bytes.0.into_vec();
+            let frame = gimli::EhFrame::new(&bytes, gimli::LittleEndian);
+            let bases = BaseAddresses::default();
+            let mut context = UnwindContext::new();
+            let mut check = |pc: u32, base, offset, fp| {
+                let row = frame
+                    .unwind_info_for_address(
+                        &bases,
+                        &mut context,
+                        u64::from(pc),
+                        gimli::EhFrame::cie_from_offset,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    *row.cfa(),
+                    CfaRule::RegisterAndOffset {
+                        register: base,
+                        offset
+                    }
+                );
+                assert_eq!(row.register(X86_64::RBP), Some(fp));
+                assert_eq!(row.register(X86_64::RA), Some(RegisterRule::Offset(-8)));
+            };
+            for (start, end) in epilogues {
+                let compact = locals + args + 8 <= i8::MAX as u32;
+                let restored_fp = if args == 0 {
+                    end - 1
+                } else if compact {
+                    end - 5
+                } else {
+                    end - 4
+                };
+                check(start, X86_64::RBP, 16, RegisterRule::Offset(-16));
+                check(restored_fp - 1, X86_64::RBP, 16, RegisterRule::Offset(-16));
+                let (base, offset) = if args == 0 {
+                    (X86_64::RSP, 8)
+                } else if compact {
+                    (X86_64::RSP, i64::from(locals + args + 16))
+                } else {
+                    (X86_64::R11, 8)
+                };
+                check(restored_fp, base, offset, RegisterRule::SameValue);
+                check(end - 1, X86_64::RSP, 8, RegisterRule::SameValue);
+                // A branch to code after RET still has the original frame.
+                check(end, X86_64::RBP, 16, RegisterRule::Offset(-16));
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn callee_pop_epilogue_encodings() -> Result<()> {

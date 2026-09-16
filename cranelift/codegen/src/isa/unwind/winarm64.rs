@@ -198,6 +198,7 @@ pub(crate) fn create_unwind_info_from_insts(
     let mut last_clobber_offset = None;
     for &(_, ref inst) in insts {
         match inst {
+            UnwindInst::SystemV(_) => {}
             &UnwindInst::PushFrameRegs { .. } => {
                 unwind_codes.push(UnwindCode::SaveFpLrPair { stack_offset: 16 });
                 unwind_codes.push(UnwindCode::SetFp);

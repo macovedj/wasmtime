@@ -56,13 +56,16 @@ pub enum UnwindInfo {
 /// and because it makes the design quite a lot simpler in general: we don't
 /// have to be precise about SP adjustments throughout the body of the function.
 ///
-/// We include only unwind info for prologues at this time. Note that unwind
+/// Most backends include only unwind info for prologues at this time. Unwind
 /// info for epilogues is only necessary if one expects to unwind while within
 /// the last few instructions of the function (after FP has been restored) or
 /// if one wishes to instruction-step through the epilogue and see a backtrace
 /// at every point. This is not necessary for correct operation otherwise and so
-/// we simplify the world a bit by omitting epilogue information. (Note that
-/// some platforms also don't require or have a way to describe unwind
+/// most backends simplify the world by omitting epilogue information. Winch's
+/// x86-64 return epilogues additionally use `SystemV` instructions to describe
+/// frame restoration for asynchronous DWARF unwinding. This does not imply
+/// that every instruction in every backend has asynchronous unwind coverage.
+/// (Note that some platforms also don't require or have a way to describe unwind
 /// information for epilogues at all: for example, on Windows, the `UNWIND_INFO`
 /// format only stores information for the function prologue.)
 ///
@@ -154,6 +157,9 @@ pub enum UnwindInfo {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub enum UnwindInst {
+    /// DWARF-only frame-state updates. Windows unwind encoders ignore these;
+    /// they do not describe Windows epilogues.
+    SystemV(SystemVUnwindInst),
     /// The frame-pointer register for this architecture has just been pushed to
     /// the stack (and on architectures where return-addresses are not pushed by
     /// hardware, the link register as well). The FP has not been set to this
@@ -211,6 +217,30 @@ pub enum UnwindInst {
     Aarch64SetPointerAuth {
         /// Whether return addresses (hold in LR) contain a pointer-authentication code.
         return_addresses: bool,
+    },
+}
+
+/// Explicit DWARF frame-state updates, for example during an epilogue.
+///
+/// These affect unwind metadata only, not execution or prologue bookkeeping.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
+pub enum SystemVUnwindInst {
+    /// Save the current DWARF rules before a temporary epilogue state.
+    RememberState,
+    /// Restore saved rules for code laid out after an epilogue, such as traps.
+    RestoreState,
+    /// Define the canonical frame address as `reg + offset`.
+    DefineCfa {
+        /// Register containing the frame base.
+        reg: RealReg,
+        /// Signed displacement from the frame base.
+        offset: i32,
+    },
+    /// The register now contains its caller's value, not a saved stack slot.
+    SameValue {
+        /// Restored register.
+        reg: RealReg,
     },
 }
 
