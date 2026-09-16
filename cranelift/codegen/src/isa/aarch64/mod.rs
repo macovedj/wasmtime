@@ -6,7 +6,7 @@ use crate::isa::aarch64::settings as aarch64_settings;
 #[cfg(feature = "unwind")]
 use crate::isa::unwind::systemv;
 use crate::isa::{Builder as IsaBuilder, FunctionAlignment, IsaFlagsHashKey, TargetIsa};
-use crate::machinst::CompiledCode;
+use crate::machinst::{CompiledCode, MachBufferFinalized};
 use crate::machinst::{
     CompiledCodeStencil, MachInst, MachTextSectionBuilder, Reg, SigSet, TextSectionBuilder, VCode,
     compile,
@@ -24,6 +24,9 @@ mod abi;
 pub mod inst;
 mod lower;
 pub mod settings;
+
+#[cfg(feature = "unwind")]
+pub use inst::unwind::systemv::create_cie;
 
 use self::inst::EmitInfo;
 
@@ -135,26 +138,7 @@ impl TargetIsa for AArch64Backend {
         result: &CompiledCode,
         kind: crate::isa::unwind::UnwindInfoKind,
     ) -> CodegenResult<Option<crate::isa::unwind::UnwindInfo>> {
-        use crate::isa::unwind::UnwindInfo;
-        use crate::isa::unwind::UnwindInfoKind;
-        Ok(match kind {
-            UnwindInfoKind::SystemV => {
-                let mapper = self::inst::unwind::systemv::RegisterMapper;
-                Some(UnwindInfo::SystemV(
-                    crate::isa::unwind::systemv::create_unwind_info_from_insts(
-                        &result.buffer.unwind_info[..],
-                        result.buffer.data().len(),
-                        &mapper,
-                    )?,
-                ))
-            }
-            UnwindInfoKind::Windows => Some(UnwindInfo::WindowsArm64(
-                crate::isa::unwind::winarm64::create_unwind_info_from_insts(
-                    &result.buffer.unwind_info[..],
-                )?,
-            )),
-            _ => None,
-        })
+        emit_unwind_info(&result.buffer, kind)
     }
 
     #[cfg(feature = "unwind")]
@@ -249,6 +233,35 @@ impl TargetIsa for AArch64Backend {
         // the same as-is for now to reduce the likelihood of problems arising.
         ir::ArgumentExtension::Uext
     }
+}
+
+/// Emit unwind info for an AArch64 target.
+pub fn emit_unwind_info(
+    buffer: &MachBufferFinalized,
+    kind: crate::isa::unwind::UnwindInfoKind,
+) -> CodegenResult<Option<crate::isa::unwind::UnwindInfo>> {
+    #[cfg(feature = "unwind")]
+    use crate::isa::unwind::{UnwindInfo, UnwindInfoKind};
+    #[cfg(not(feature = "unwind"))]
+    let _ = buffer;
+    Ok(match kind {
+        #[cfg(feature = "unwind")]
+        UnwindInfoKind::SystemV => {
+            let mapper = self::inst::unwind::systemv::RegisterMapper;
+            Some(UnwindInfo::SystemV(
+                crate::isa::unwind::systemv::create_unwind_info_from_insts(
+                    &buffer.unwind_info[..],
+                    buffer.data().len(),
+                    &mapper,
+                )?,
+            ))
+        }
+        #[cfg(feature = "unwind")]
+        UnwindInfoKind::Windows => Some(UnwindInfo::WindowsArm64(
+            crate::isa::unwind::winarm64::create_unwind_info_from_insts(&buffer.unwind_info[..])?,
+        )),
+        _ => None,
+    })
 }
 
 impl fmt::Display for AArch64Backend {

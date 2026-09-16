@@ -147,11 +147,22 @@ impl TargetIsa for Aarch64 {
 
     fn emit_unwind_info(
         &self,
-        _result: &MachBufferFinalized,
-        _kind: cranelift_codegen::isa::unwind::UnwindInfoKind,
+        result: &MachBufferFinalized,
+        kind: cranelift_codegen::isa::unwind::UnwindInfoKind,
     ) -> Result<Option<cranelift_codegen::isa::unwind::UnwindInfo>> {
-        // TODO: should fill this in with an actual implementation
-        Ok(None)
+        use cranelift_codegen::isa::unwind::UnwindInfoKind;
+        // Winch currently describes AArch64 frames only with DWARF. Do not
+        // advertise Windows unwind support using the System V annotations.
+        match kind {
+            UnwindInfoKind::SystemV => Ok(cranelift_codegen::isa::aarch64::emit_unwind_info(
+                result, kind,
+            )?),
+            _ => Ok(None),
+        }
+    }
+
+    fn create_systemv_cie(&self) -> Option<gimli::write::CommonInformationEntry> {
+        Some(cranelift_codegen::isa::aarch64::create_cie())
     }
 
     fn page_size_align_log2(&self) -> u8 {

@@ -28,6 +28,7 @@ use crate::{
     },
     stack::{TypedReg, Val},
 };
+use cranelift_codegen::isa::unwind::{SystemVUnwindInst, UnwindInst};
 use cranelift_codegen::{
     ExceptionContextLoc, MachBufferFinalized, MachExceptionHandler, MachLabel,
     binemit::CodeOffset,
@@ -152,11 +153,30 @@ impl Masm for MacroAssembler {
         let fp = regs::fp();
         let sp = regs::sp();
 
+        if self.shared_flags.unwind_info() {
+            // Winch does not sign return addresses. In particular, Apple's
+            // native unwinder requires an explicit unsigned-address rule.
+            self.asm.unwind_inst(UnwindInst::Aarch64SetPointerAuth {
+                return_addresses: false,
+            });
+        }
+
         let offset = SImm7Scaled::maybe_from_i64(-16, types::I64)
             .expect("Frame pointer offset of -16 is valid for pair addressing");
         let addr = Address::pre_indexed_from_sp_for_pair(offset);
         self.asm.stp(fp, lr, addr.to_pair_addressing_mode());
+        if self.shared_flags.unwind_info() {
+            self.asm.unwind_inst(UnwindInst::PushFrameRegs {
+                offset_upward_to_caller_sp: 16,
+            });
+        }
         self.asm.mov_rr(sp, writable!(fp), OperandSize::S64);
+        if self.shared_flags.unwind_info() {
+            self.asm.unwind_inst(UnwindInst::DefineNewFrame {
+                offset_upward_to_caller_sp: 16,
+                offset_downward_to_clobbers: SHADOW_STACK_POINTER_SLOT_SIZE.into(),
+            });
+        }
 
         let offset = SImm9::maybe_from_i64(-(SHADOW_STACK_POINTER_SLOT_SIZE as i64))
             .expect("Shadow stack pointer slot size is valid for single addressing");
@@ -166,6 +186,15 @@ impl Masm for MacroAssembler {
                 .str(regs::shadow_sp(), mem, OperandSize::S64, TRUSTED_FLAGS);
             Ok(())
         })?;
+
+        if self.shared_flags.unwind_info() {
+            self.asm.unwind_inst(UnwindInst::SaveReg {
+                reg: cranelift_codegen::Reg::from(regs::shadow_sp())
+                    .to_real_reg()
+                    .unwrap(),
+                clobber_offset: 0,
+            });
+        }
 
         self.move_sp_to_shadow_sp();
         Ok(())
@@ -222,6 +251,14 @@ impl Masm for MacroAssembler {
     fn frame_restore(&mut self) -> Result<()> {
         debug_assert_eq!(self.sp_offset, 0);
 
+        // Veneers can also be entered from the function body. Emit them while
+        // the body unwind rules still apply, never amid restored registers.
+        self.asm.prepare_epilogue();
+        if self.shared_flags.unwind_info() {
+            self.asm
+                .unwind_inst(UnwindInst::SystemV(SystemVUnwindInst::RememberState));
+        }
+
         // Sync the real stack pointer with the value of the shadow stack
         // pointer.
         self.move_shadow_sp_to_sp();
@@ -242,6 +279,15 @@ impl Masm for MacroAssembler {
             Ok(())
         })?;
 
+        if self.shared_flags.unwind_info() {
+            self.asm
+                .unwind_inst(UnwindInst::SystemV(SystemVUnwindInst::SameValue {
+                    reg: cranelift_codegen::Reg::from(regs::shadow_sp())
+                        .to_real_reg()
+                        .unwrap(),
+                }));
+        }
+
         // Restore the link register and frame pointer.
         let lr = regs::lr();
         let fp = regs::fp();
@@ -250,7 +296,30 @@ impl Masm for MacroAssembler {
         let addr = Address::post_indexed_from_sp_for_pair(offset);
 
         self.asm.ldp(fp, lr, addr.to_pair_addressing_mode());
+        if self.shared_flags.unwind_info() {
+            // LDP restores FP/LR and advances SP to the caller's SP in one
+            // instruction. The CFA can no longer be based on our old FP.
+            self.asm
+                .unwind_inst(UnwindInst::SystemV(SystemVUnwindInst::DefineCfa {
+                    reg: cranelift_codegen::Reg::from(regs::sp())
+                        .to_real_reg()
+                        .unwrap(),
+                    offset: 0,
+                }));
+            for reg in [fp, lr] {
+                self.asm
+                    .unwind_inst(UnwindInst::SystemV(SystemVUnwindInst::SameValue {
+                        reg: cranelift_codegen::Reg::from(reg).to_real_reg().unwrap(),
+                    }));
+            }
+        }
         self.asm.ret();
+        if self.shared_flags.unwind_info() {
+            // Other return paths and out-of-line traps still have the body
+            // frame, even when they are laid out after this epilogue.
+            self.asm
+                .unwind_inst(UnwindInst::SystemV(SystemVUnwindInst::RestoreState));
+        }
         Ok(())
     }
 
@@ -2696,5 +2765,252 @@ impl MacroAssembler {
         let sp = writable!(regs::sp());
         let imm = Imm12::maybe_from_u64(0).unwrap();
         self.asm.add_ir(imm, shadow_sp, sp, OperandSize::S64);
+    }
+}
+
+#[cfg(test)]
+mod unwind_tests {
+    use super::*;
+    use crate::isa::{TargetIsa, aarch64::Aarch64};
+    use cranelift_codegen::isa::unwind::{UnwindInfo, UnwindInfoKind};
+    use cranelift_codegen::settings::Configurable;
+    use gimli::{
+        BaseAddresses, CfaRule, LittleEndian, Register, RegisterRule, UnwindContext, UnwindSection,
+        UnwindTableRow,
+        write::{Address as DwarfAddress, EndianVec, FrameTable},
+    };
+
+    fn compile_frame(unwind_info: bool, locals: u32) -> (Aarch64, MachBufferFinalized, u64) {
+        let mut builder = settings::builder();
+        builder
+            .set("unwind_info", if unwind_info { "true" } else { "false" })
+            .unwrap();
+        let flags = settings::Flags::new(builder);
+        let isa_flags = aarch64::settings::Flags::new(&flags, &aarch64::settings::builder());
+        let isa = Aarch64::new(
+            "aarch64-apple-darwin".parse().unwrap(),
+            flags.clone(),
+            isa_flags.clone(),
+        );
+        let mut masm = MacroAssembler::new(8u8, flags, isa_flags).unwrap();
+        masm.frame_setup().unwrap();
+        masm.reserve_stack(locals).unwrap();
+        masm.free_stack(locals).unwrap();
+        let first_epilogue = u64::from(masm.asm.buffer_mut().cur_offset());
+        // Two separately laid-out return paths, followed by body-state code.
+        // The metadata must not leak one epilogue's restored-register rules
+        // into either the next path or out-of-line code.
+        masm.frame_restore().unwrap();
+        masm.frame_restore().unwrap();
+        masm.asm
+            .mov_rr(regs::xreg(0), writable!(regs::xreg(0)), OperandSize::S64);
+        (isa, masm.finalize(None).unwrap(), first_epilogue)
+    }
+
+    fn serialized_rows(isa: &Aarch64, buffer: &MachBufferFinalized) -> Vec<UnwindTableRow<usize>> {
+        let Some(UnwindInfo::SystemV(info)) = isa
+            .emit_unwind_info(buffer, UnwindInfoKind::SystemV)
+            .unwrap()
+        else {
+            panic!("expected System V unwind information");
+        };
+        let mut table = FrameTable::default();
+        let cie = table.add_cie(isa.create_systemv_cie().unwrap());
+        table.add_fde(cie, info.to_fde(DwarfAddress::Constant(0)));
+        let mut output = gimli::write::EhFrame(EndianVec::new(LittleEndian));
+        table.write_eh_frame(&mut output).unwrap();
+
+        let section = gimli::EhFrame::new(output.0.slice(), LittleEndian);
+        let bases = BaseAddresses::default();
+        let mut entries = section.entries(&bases);
+        while let Some(entry) = entries.next().unwrap() {
+            if let gimli::CieOrFde::Fde(partial) = entry {
+                let fde = partial.parse(gimli::EhFrame::cie_from_offset).unwrap();
+                let mut context = UnwindContext::new();
+                let mut rows = fde.rows(&section, &bases, &mut context).unwrap();
+                let mut result = Vec::new();
+                while let Some(row) = rows.next_row().unwrap() {
+                    result.push(row.clone());
+                }
+                return result;
+            }
+        }
+        panic!("expected serialized FDE");
+    }
+
+    fn row_at(rows: &[UnwindTableRow<usize>], offset: u64) -> &UnwindTableRow<usize> {
+        rows.iter()
+            .find(|row| row.start_address() <= offset && offset < row.end_address())
+            .unwrap()
+    }
+
+    fn assert_body_state(row: &UnwindTableRow<usize>) {
+        assert_eq!(
+            row.cfa(),
+            &CfaRule::RegisterAndOffset {
+                register: Register(29),
+                offset: 16,
+            }
+        );
+        assert_eq!(row.register(Register(28)), Some(RegisterRule::Offset(-32)));
+        assert_eq!(row.register(Register(29)), Some(RegisterRule::Offset(-16)));
+        assert_eq!(row.register(Register(30)), Some(RegisterRule::Offset(-8)));
+    }
+
+    #[test]
+    fn aarch64_unwind_prologue_and_multiple_epilogues() {
+        for locals in [0, 32, 4096] {
+            let (isa, buffer, epilogue) = compile_frame(true, locals);
+            let rows = serialized_rows(&isa, &buffer);
+
+            let entry = row_at(&rows, 0);
+            assert_eq!(
+                entry.cfa(),
+                &CfaRule::RegisterAndOffset {
+                    register: Register(31),
+                    offset: 0,
+                }
+            );
+            // Apple's native unwinder needs the explicit unsigned RA marker.
+            assert!(matches!(
+                entry.register(Register(34)),
+                Some(RegisterRule::ValExpression(_))
+            ));
+            let pushed = row_at(&rows, 4);
+            assert_eq!(
+                pushed.cfa(),
+                &CfaRule::RegisterAndOffset {
+                    register: Register(31),
+                    offset: 16,
+                }
+            );
+            assert_eq!(
+                pushed.register(Register(29)),
+                Some(RegisterRule::Offset(-16))
+            );
+            assert_eq!(
+                pushed.register(Register(30)),
+                Some(RegisterRule::Offset(-8))
+            );
+            assert_eq!(
+                row_at(&rows, 8).cfa(),
+                &CfaRule::RegisterAndOffset {
+                    register: Register(29),
+                    offset: 16,
+                }
+            );
+            assert_body_state(row_at(&rows, 12));
+
+            for start in [epilogue, epilogue + 16] {
+                assert_body_state(row_at(&rows, start));
+                assert_body_state(row_at(&rows, start + 4));
+                let restored_ssp = row_at(&rows, start + 8);
+                assert_eq!(
+                    restored_ssp.register(Register(28)),
+                    Some(RegisterRule::SameValue)
+                );
+                assert_eq!(
+                    restored_ssp.register(Register(29)),
+                    Some(RegisterRule::Offset(-16))
+                );
+                assert_eq!(
+                    restored_ssp.register(Register(30)),
+                    Some(RegisterRule::Offset(-8))
+                );
+                let restored_frame = row_at(&rows, start + 12);
+                assert_eq!(
+                    restored_frame.cfa(),
+                    &CfaRule::RegisterAndOffset {
+                        register: Register(31),
+                        offset: 0,
+                    }
+                );
+                for reg in [28, 29, 30] {
+                    assert_eq!(
+                        restored_frame.register(Register(reg)),
+                        Some(RegisterRule::SameValue)
+                    );
+                }
+                assert_body_state(row_at(&rows, start + 16));
+            }
+        }
+    }
+
+    #[test]
+    fn aarch64_unwind_metadata_does_not_change_machine_code() {
+        for locals in [0, 32, 4096] {
+            let (isa, enabled, _) = compile_frame(true, locals);
+            let (_, disabled, _) = compile_frame(false, locals);
+            assert_eq!(enabled.data(), disabled.data());
+            assert!(serialized_rows(&isa, &enabled).len() > 1);
+            let disabled_rows = serialized_rows(&isa, &disabled);
+            assert_eq!(disabled_rows.len(), 1);
+            assert_eq!(
+                disabled_rows[0].cfa(),
+                &CfaRule::RegisterAndOffset {
+                    register: Register(31),
+                    offset: 0,
+                }
+            );
+            for reg in [28, 29, 30, 34] {
+                assert_eq!(disabled_rows[0].register(Register(reg)), None);
+            }
+            assert!(
+                isa.emit_unwind_info(&enabled, UnwindInfoKind::Windows)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                isa.emit_unwind_info(&enabled, UnwindInfoKind::None)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn aarch64_unwind_islands_stay_outside_epilogues() {
+        use cranelift_codegen::MachInst;
+
+        let (isa, reference, reference_epilogue) = compile_frame(true, 0);
+        let mut masm =
+            MacroAssembler::new(8u8, isa.shared_flags.clone(), isa.isa_flags.clone()).unwrap();
+        masm.frame_setup().unwrap();
+        let target = masm.get_label().unwrap();
+        masm.asm.jmp_if(Cond::Eq, target);
+        // Force this body branch to need a veneer during the epilogue if we
+        // only used the ordinary per-instruction island lookahead.
+        let lookahead = inst::Inst::worst_case_size();
+        while !masm.asm.buffer_mut().island_needed(lookahead + 12) {
+            masm.asm.buffer_mut().put4(0xd503201f); // NOP
+        }
+        assert!(!masm.asm.buffer_mut().island_needed(lookahead));
+        let before = u64::from(masm.asm.buffer_mut().cur_offset());
+        masm.frame_restore().unwrap();
+        let after = u64::from(masm.asm.buffer_mut().cur_offset());
+        let epilogue = after - 16;
+        assert!(epilogue > before, "the test must emit an island");
+        masm.bind(target).unwrap();
+        masm.asm
+            .mov_rr(regs::xreg(0), writable!(regs::xreg(0)), OperandSize::S64);
+        let buffer = masm.finalize(None).unwrap();
+        assert_eq!(
+            &buffer.data()[epilogue as usize..after as usize],
+            &reference.data()[reference_epilogue as usize..reference_epilogue as usize + 16],
+            "no islands may interrupt the frame-restore sequence"
+        );
+        let rows = serialized_rows(&isa, &buffer);
+        for offset in (before..epilogue).step_by(4) {
+            assert_body_state(row_at(&rows, offset));
+        }
+        assert_body_state(row_at(&rows, epilogue));
+        assert_body_state(row_at(&rows, after));
+        assert_eq!(
+            row_at(&rows, epilogue + 12).cfa(),
+            &CfaRule::RegisterAndOffset {
+                register: Register(31),
+                offset: 0,
+            }
+        );
     }
 }
