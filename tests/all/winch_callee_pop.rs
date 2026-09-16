@@ -142,7 +142,10 @@ fn callee_pop_returns_and_traps(config: &mut Config) -> Result<()> {
             .consume_fuel(fuel);
         config.max_wasm_stack(64 * 1024);
         let engine = Engine::new(&config)?;
-        for n in [0, 1, 5, 10, 32] {
+        // Exercise both sides of AArch64's signed load/store-offset range,
+        // the previously failing 64/80-argument tails, and an entry-SP delta
+        // that cannot be encoded by one add/sub immediate.
+        for n in [0, 1, 5, 10, 32, 38, 39, 40, 64, 80, 528] {
             let params = " i64".repeat(n);
             let args = (1..=n)
                 .map(|i| format!("i64.const {i} "))

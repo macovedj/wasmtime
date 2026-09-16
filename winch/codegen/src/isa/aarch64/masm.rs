@@ -553,85 +553,67 @@ impl Masm for MacroAssembler {
     ) -> Result<()> {
         let word_bytes = u32::from(<Self::ABI as ABI>::word_bytes());
 
-        // Reserve one pointer slot for the original FP, rounded up to the
-        // target's call-stack alignment.
+        // Save FP and the caller's shadow SP below the staged arguments. Both
+        // integer scratch registers must be available during the argument move:
+        // one holds the value and the other materializes large address offsets.
         let scratch_size = align_to(
-            word_bytes,
+            2 * word_bytes,
             u32::from(<Self::ABI as ABI>::call_stack_align()),
         );
         self.reserve_stack(scratch_size)?;
 
-        self.with_scratch::<IntScratch, _>(|masm, saved_ssp| {
-            // Preserve the original shadow SP and LR in registers before the
-            // argument move, which can overwrite their frame slots.
+        self.with_scratch::<IntScratch, _>(|masm, work| {
+            // The argument move can overwrite all three original frame slots.
+            masm.load_ptr(Address::offset(regs::fp(), 0), work.writable())?;
+            masm.store_ptr(work.inner(), Address::from_shadow_sp(0))?;
             masm.load_ptr(
                 Address::offset(regs::fp(), -i64::from(SHADOW_STACK_POINTER_SLOT_SIZE)),
-                saved_ssp.writable(),
+                work.writable(),
             )?;
-            masm.load_ptr(
-                Address::offset(regs::fp(), i64::from(word_bytes)),
-                writable!(regs::lr()),
-            )?;
+            masm.store_ptr(work.inner(), Address::from_shadow_sp(i64::from(word_bytes)))
+        })?;
+        self.load_ptr(
+            Address::offset(regs::fp(), i64::from(word_bytes)),
+            writable!(regs::lr()),
+        )?;
 
-            masm.with_scratch::<IntScratch, _>(|masm, work| {
-                // Keep the original FP in the scratch slot below the staged
-                // argument block.
-                masm.load_ptr(Address::offset(regs::fp(), 0), work.writable())?;
-                masm.store_ptr(work.inner(), Address::from_shadow_sp(0))?;
-                wasmtime_environ::error::Ok(())
-            })?;
+        move_args(self, scratch_size)?;
 
-            move_args(masm, scratch_size)?;
-
-            masm.with_scratch::<IntScratch, _>(|masm, work| {
-                // Calculate the callee's entry SP while the current FP is
-                // still available. Do this with only `work`, because the other
-                // scratch register is preserving the caller's shadow SP.
-                let magnitude = plan.callee_args_from_fp.unsigned_abs();
-                if let Some(imm) = Imm12::maybe_from_u64(magnitude) {
-                    if plan.callee_args_from_fp >= 0 {
-                        masm.asm
-                            .add_ir(imm, regs::fp(), work.writable(), OperandSize::S64);
-                    } else {
-                        masm.asm
-                            .sub_ir(imm, regs::fp(), work.writable(), OperandSize::S64);
-                    }
+        self.with_scratch::<IntScratch, _>(|masm, work| {
+            // Calculate the callee's entry SP while the current FP is available.
+            let magnitude = plan.callee_args_from_fp.unsigned_abs();
+            if let Some(imm) = Imm12::maybe_from_u64(magnitude) {
+                if plan.callee_args_from_fp >= 0 {
+                    masm.asm
+                        .add_ir(imm, regs::fp(), work.writable(), OperandSize::S64);
                 } else {
                     masm.asm
-                        .mov_ir(work.writable(), I::I64(magnitude), OperandSize::S64);
-                    if plan.callee_args_from_fp >= 0 {
-                        masm.asm.add_rrr(
-                            work.inner(),
-                            regs::fp(),
-                            work.writable(),
-                            OperandSize::S64,
-                        );
-                    } else {
-                        masm.asm.sub_rrr(
-                            work.inner(),
-                            regs::fp(),
-                            work.writable(),
-                            OperandSize::S64,
-                        );
-                    }
+                        .sub_ir(imm, regs::fp(), work.writable(), OperandSize::S64);
                 }
-
-                // Restore the caller FP from the scratch slot. The tail
-                // callee's prologue will save FP, LR, and x28 into its
-                // replacement frame.
-                masm.load_ptr(Address::from_shadow_sp(0), writable!(regs::fp()))?;
-
-                let zero = Imm12::maybe_from_u64(0).unwrap();
+            } else {
                 masm.asm
-                    .add_ir(zero, work.inner(), writable!(regs::sp()), OperandSize::S64);
-                masm.asm.mov_rr(
-                    saved_ssp.inner(),
-                    writable!(regs::shadow_sp()),
-                    OperandSize::S64,
-                );
+                    .mov_ir(work.writable(), I::I64(magnitude), OperandSize::S64);
+                if plan.callee_args_from_fp >= 0 {
+                    masm.asm
+                        .add_rrr(work.inner(), regs::fp(), work.writable(), OperandSize::S64);
+                } else {
+                    masm.asm
+                        .sub_rrr(work.inner(), regs::fp(), work.writable(), OperandSize::S64);
+                }
+            }
 
-                wasmtime_environ::error::Ok(())
-            })
+            // Finish all old-frame reads before advancing SP. The tail callee
+            // will save FP, LR, and x28 into its replacement frame.
+            masm.load_ptr(Address::from_shadow_sp(0), writable!(regs::fp()))?;
+            masm.load_ptr(
+                Address::from_shadow_sp(i64::from(word_bytes)),
+                writable!(regs::shadow_sp()),
+            )?;
+
+            let zero = Imm12::maybe_from_u64(0).unwrap();
+            masm.asm
+                .add_ir(zero, work.inner(), writable!(regs::sp()), OperandSize::S64);
+            wasmtime_environ::error::Ok(())
         })
     }
 
