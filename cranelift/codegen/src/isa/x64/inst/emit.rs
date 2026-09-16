@@ -1,5 +1,6 @@
 use crate::ir::KnownSymbol;
 use crate::ir::immediates::{Ieee32, Ieee64};
+use crate::isa::unwind::UnwindInst;
 use crate::isa::x64::external::{AsmInst, CraneliftRegisters, PairedGpr};
 use crate::isa::x64::inst::args::*;
 use crate::isa::x64::inst::*;
@@ -1886,8 +1887,22 @@ fn emit_return_call_common_sequence<T>(
 
     let tmp = call_info.tmp.to_writable_reg();
 
+    // These helpers also serve normal returns, whose DWARF epilogue rules are
+    // scoped by Callee::gen_epilogue. Tail transfers do not yet describe their
+    // full frame transition, so do not emit those rules here or leak them into
+    // subsequent blocks.
+    let is_not_dwarf_unwind = |inst: &Inst| {
+        !matches!(
+            inst,
+            Inst::Unwind {
+                inst: UnwindInst::SystemV(_)
+            }
+        )
+    };
     for inst in
         X64ABIMachineSpec::gen_clobber_restore(CallConv::Tail, &info.flags, state.frame_layout())
+            .into_iter()
+            .filter(is_not_dwarf_unwind)
     {
         inst.emit(sink, info, state);
     }
@@ -1897,7 +1912,10 @@ fn emit_return_call_common_sequence<T>(
         &info.flags,
         &info.isa_flags,
         state.frame_layout(),
-    ) {
+    )
+    .into_iter()
+    .filter(is_not_dwarf_unwind)
+    {
         inst.emit(sink, info, state);
     }
 

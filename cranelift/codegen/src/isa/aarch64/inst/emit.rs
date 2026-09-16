@@ -5,6 +5,7 @@ use cranelift_control::ControlPlane;
 use crate::ir::{self, types::*};
 use crate::isa::aarch64;
 use crate::isa::aarch64::inst::*;
+use crate::isa::unwind::{SystemVUnwindInst, UnwindInst};
 use crate::trace;
 
 /// Memory addressing mode finalization: convert "special" modes (e.g.,
@@ -3020,6 +3021,15 @@ impl MachInstEmit for Inst {
 
                 if is_hint {
                     sink.put4(key.enc_auti_hint());
+                    if emit_info.flags.unwind_info() {
+                        // Authentication and return are separate instructions
+                        // in this encoding. At the RET, LR is no longer signed.
+                        sink.add_unwind(UnwindInst::SystemV(
+                            SystemVUnwindInst::Aarch64SetPointerAuth {
+                                return_addresses: false,
+                            },
+                        ));
+                    }
                     Inst::Ret {}.emit(sink, emit_info, state);
                 } else {
                     sink.put4(0xd65f0bff | (op2 << 9)); // reta{key}
@@ -3733,11 +3743,11 @@ fn emit_return_call_common_sequence<T>(
     state: &mut EmitState,
     info: &ReturnCallInfo<T>,
 ) {
-    for inst in AArch64MachineDeps::gen_clobber_restore(
-        CallConv::Tail,
-        &emit_info.flags,
-        state.frame_layout(),
-    ) {
+    // Return-call transitions need their own complete unwind description. Do
+    // not apply ordinary-return register rules to this separate sequence.
+    for inst in
+        AArch64MachineDeps::gen_clobber_restore_impl(CallConv::Tail, state.frame_layout(), false)
+    {
         inst.emit(sink, emit_info, state);
     }
 

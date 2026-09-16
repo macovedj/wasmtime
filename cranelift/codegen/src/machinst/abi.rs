@@ -105,6 +105,7 @@ use crate::entity::SecondaryMap;
 use crate::ir::{ArgumentExtension, ArgumentPurpose, ExceptionTag, Signature};
 use crate::ir::{StackSlotKey, types::*};
 use crate::isa::TargetIsa;
+use crate::isa::unwind::SystemVUnwindInst;
 use crate::settings::ProbestackStrategy;
 use crate::{ir, isa};
 use crate::{machinst::*, trace};
@@ -532,6 +533,12 @@ pub trait ABIMachineSpec {
         isa_flags: &Self::F,
         frame_layout: &FrameLayout,
     ) -> SmallInstVec<Self::I>;
+
+    /// Emit a DWARF frame-state update for backends that describe epilogues.
+    /// Other unwind formats ignore these metadata-only instructions.
+    fn gen_dwarf_unwind(_inst: SystemVUnwindInst) -> Option<Self::I> {
+        None
+    }
 
     /// Generate a return instruction.
     fn gen_return(
@@ -2360,6 +2367,12 @@ impl<M: ABIMachineSpec> Callee<M> {
         let frame_layout = self.frame_layout();
         let mut insts = smallvec![];
 
+        // Epilogue rules apply only to this return path. Save the body rules
+        // before restoring any registers, including callee-save clobbers.
+        if self.flags.unwind_info() {
+            insts.extend(M::gen_dwarf_unwind(SystemVUnwindInst::RememberState));
+        }
+
         // Restore clobbered registers.
         insts.extend(M::gen_clobber_restore(
             self.call_conv,
@@ -2381,6 +2394,12 @@ impl<M: ABIMachineSpec> Callee<M> {
             &self.isa_flags,
             &frame_layout,
         ));
+
+        // Code laid out after the return (another block or a trap island) still
+        // uses the function body's frame, not this epilogue's restored frame.
+        if self.flags.unwind_info() {
+            insts.extend(M::gen_dwarf_unwind(SystemVUnwindInst::RestoreState));
+        }
 
         trace!("Epilogue: {:?}", insts);
         insts

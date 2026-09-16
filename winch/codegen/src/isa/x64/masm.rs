@@ -38,13 +38,105 @@ use cranelift_codegen::{
     binemit::CodeOffset,
     ir::{MemFlagsData, RelSourceLoc, SourceLoc},
     isa::{
-        unwind::UnwindInst,
+        unwind::{SystemVUnwindInst, UnwindInst},
         x64::{AtomicRmwSeqOp, args::CC, settings as x64_settings},
     },
     settings,
 };
 use wasmtime_cranelift::TRAP_UNREACHABLE;
 use wasmtime_environ::{PtrSize, WasmValType};
+
+#[cfg(test)]
+mod unwind_tests {
+    use super::*;
+    use cranelift_codegen::isa::{
+        unwind::{UnwindInfo, UnwindInfoKind},
+        x64::{create_cie, emit_unwind_info},
+    };
+    use gimli::{BaseAddresses, CfaRule, RegisterRule, UnwindContext, UnwindSection, X86_64};
+
+    fn fixture(epilogue_info: bool) -> Result<(MachBufferFinalized, Vec<u32>)> {
+        use settings::Configurable;
+        let mut builder = settings::builder();
+        builder.set("unwind_info", "true").unwrap();
+        let shared = settings::Flags::new(builder.clone());
+        let isa = x64_settings::Flags::new(&shared, &x64_settings::builder());
+        let mut masm = MacroAssembler::new(8u8, shared, isa)?;
+        masm.frame_setup()?;
+        masm.asm.unwind_inst(UnwindInst::DefineNewFrame {
+            offset_upward_to_caller_sp: 16,
+            offset_downward_to_clobbers: 0,
+        });
+        // Exercise epilogue offsets beyond Windows' one-byte prologue limit.
+        for _ in 0..100 {
+            masm.asm
+                .mov_rr(regs::rax(), writable!(regs::rax()), OperandSize::S64);
+        }
+        builder
+            .set("unwind_info", if epilogue_info { "true" } else { "false" })
+            .unwrap();
+        masm.shared_flags = settings::Flags::new(builder);
+        let mut starts = vec![];
+        for _ in 0..2 {
+            starts.push(masm.asm.buffer_mut().cur_offset());
+            masm.frame_restore()?;
+            // Represents another block still using the function's body frame.
+            masm.asm
+                .mov_rr(regs::rax(), writable!(regs::rax()), OperandSize::S64);
+        }
+        Ok((masm.finalize(None)?, starts))
+    }
+
+    #[test]
+    fn return_epilogue_unwind_rows() -> Result<()> {
+        use gimli::write::{Address as DwarfAddress, EhFrame, EndianVec, FrameTable};
+        let (code, starts) = fixture(true)?;
+        let (without, _) = fixture(false)?;
+        assert_eq!(code.data(), without.data());
+        assert_eq!(
+            emit_unwind_info(&code, UnwindInfoKind::Windows).unwrap(),
+            emit_unwind_info(&without, UnwindInfoKind::Windows).unwrap(),
+        );
+        let Some(UnwindInfo::SystemV(info)) =
+            emit_unwind_info(&code, UnwindInfoKind::SystemV).unwrap()
+        else {
+            panic!("expected DWARF unwind info")
+        };
+        let mut table = FrameTable::default();
+        let cie = table.add_cie(create_cie());
+        table.add_fde(cie, info.to_fde(DwarfAddress::Constant(0)));
+        let mut bytes = EhFrame(EndianVec::new(gimli::LittleEndian));
+        table.write_eh_frame(&mut bytes).unwrap();
+        let bytes = bytes.0.into_vec();
+        let frame = gimli::EhFrame::new(&bytes, gimli::LittleEndian);
+        let bases = BaseAddresses::default();
+        let mut context = UnwindContext::new();
+        for start in starts {
+            assert_eq!(
+                &code.data()[start as usize..start as usize + 2],
+                &[0x5d, 0xc3]
+            );
+            for (pc, register, offset, fp) in [
+                (start, X86_64::RBP, 16, RegisterRule::Offset(-16)),
+                (start + 1, X86_64::RSP, 8, RegisterRule::SameValue),
+                (start + 2, X86_64::RBP, 16, RegisterRule::Offset(-16)),
+            ] {
+                let row = frame
+                    .unwind_info_for_address(
+                        &bases,
+                        &mut context,
+                        u64::from(pc),
+                        gimli::EhFrame::cie_from_offset,
+                    )
+                    .unwrap();
+                assert_eq!(*row.cfa(), CfaRule::RegisterAndOffset { register, offset });
+                assert_eq!(row.register(X86_64::RBP), Some(fp));
+                assert_eq!(row.register(X86_64::RA), Some(RegisterRule::Offset(-8)));
+            }
+        }
+        Ok(())
+    }
+}
 
 // Taken from `cranelift/codegen/src/isa/x64/lower/isle.rs`
 // Since x64 doesn't have 8x16 shifts and we must use a 16x8 shift instead, we
@@ -950,8 +1042,27 @@ impl Masm for MacroAssembler {
 
     fn frame_restore(&mut self) -> Result<()> {
         debug_assert_eq!(self.sp_offset, 0);
+        if self.shared_flags.unwind_info() {
+            self.asm
+                .unwind_inst(UnwindInst::SystemV(SystemVUnwindInst::RememberState));
+        }
         self.asm.pop_r(writable!(rbp()));
+        if self.shared_flags.unwind_info() {
+            self.asm
+                .unwind_inst(UnwindInst::SystemV(SystemVUnwindInst::DefineCfa {
+                    reg: regs::rsp().inner().into(),
+                    offset: 8,
+                }));
+            self.asm
+                .unwind_inst(UnwindInst::SystemV(SystemVUnwindInst::SameValue {
+                    reg: rbp().inner().into(),
+                }));
+        }
         self.asm.ret();
+        if self.shared_flags.unwind_info() {
+            self.asm
+                .unwind_inst(UnwindInst::SystemV(SystemVUnwindInst::RestoreState));
+        }
         Ok(())
     }
 

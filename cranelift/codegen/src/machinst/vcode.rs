@@ -76,6 +76,48 @@ pub type BlockIndex = regalloc2::Block;
 pub trait VCodeInst: MachInst + MachInstEmit {}
 impl<I: MachInst + MachInstEmit> VCodeInst for I {}
 
+/// Emit a return epilogue without inserting an island into its temporary frame
+/// state. In particular, unwind annotations must remain adjacent to the
+/// instructions they describe, and body-entered traps must not inherit an
+/// epilogue's rules.
+fn emit_epilogue<I: VCodeInst>(
+    epilogue: &[I],
+    buffer: &mut MachBuffer<I>,
+    info: &I::Info,
+    state: &mut I::State,
+    mut disasm: Option<&mut String>,
+) {
+    let lookahead = I::worst_case_size() + I::worst_case_island_growth();
+    // Reserve the whole batch, including possible per-instruction growth of
+    // pending islands. The extra two instructions cover a jump around the
+    // preflight island and the normal lookahead after the epilogue.
+    let reserve = u32::try_from(epilogue.len())
+        .unwrap()
+        .saturating_add(2)
+        .saturating_mul(lookahead);
+    if buffer.island_needed(reserve) {
+        let jump_around = buffer.get_label();
+        I::gen_jump(jump_around).emit(buffer, info, state);
+        buffer.emit_island(reserve, state.ctrl_plane_mut());
+        buffer.bind_label(jump_around, state.ctrl_plane_mut());
+    }
+
+    for inst in epilogue {
+        if let Some(disasm) = disasm.as_deref_mut() {
+            let mut s = state.clone();
+            writeln!(disasm, "  {}", inst.pretty_print_inst(&mut s)).unwrap();
+        }
+        inst.emit(buffer, info, state);
+    }
+
+    // RestoreState has now reinstated the body rules, so traps in an island
+    // after this return can be described by those rules. No jump-around is
+    // needed: the epilogue ended with a return.
+    if buffer.island_needed(lookahead) {
+        buffer.emit_island(lookahead, state.ctrl_plane_mut());
+    }
+}
+
 /// A function in "VCode" (virtualized-register code) form, after
 /// lowering.  This is essentially a standard CFG of basic blocks,
 /// where each basic block consists of lowered instructions produced
@@ -1000,9 +1042,13 @@ impl<I: VCodeInst> VCode<I> {
                         // epilogue will contain it).
                         if self.insts[iix.index()].is_term() == MachTerminator::Ret {
                             log::trace!("emitting epilogue");
-                            for inst in self.abi.gen_epilogue() {
-                                do_emit(&inst, &mut disasm, &mut buffer, &mut state);
-                            }
+                            emit_epilogue(
+                                &self.abi.gen_epilogue(),
+                                &mut buffer,
+                                &self.emit_info,
+                                &mut state,
+                                want_disasm.then_some(&mut disasm),
+                            );
                         } else {
                             // Update the operands for this inst using the
                             // allocations from the regalloc result.
@@ -1966,5 +2012,79 @@ mod test {
         // TODO The VCodeConstants structure's memory size could be further optimized.
         // With certain versions of Rust, each `HashMap` in `VCodeConstants` occupied at
         // least 48 bytes, making an empty `VCodeConstants` cost 120 bytes.
+    }
+
+    #[cfg(all(feature = "arm64", feature = "unwind"))]
+    #[test]
+    fn epilogue_unwind_state_excludes_islands() {
+        use crate::isa::CallConv;
+        use crate::isa::aarch64::{inst::*, settings as isa_settings};
+        use crate::isa::unwind::{SystemVUnwindInst, UnwindInst};
+        use crate::settings;
+
+        type Abi = <Inst as MachInst>::ABIMachineSpec;
+        let flags = settings::Flags::new(settings::builder());
+        let isa_flags = isa_settings::Flags::new(&flags, &isa_settings::builder());
+        let info = EmitInfo::new(flags.clone(), isa_flags.clone());
+        let frame = FrameLayout {
+            word_bytes: 8,
+            setup_area_size: 16,
+            ..FrameLayout::default()
+        };
+        let mut buffer = MachBuffer::<Inst>::new();
+        let mut state = EmitState::default();
+        for inst in Abi::gen_prologue_frame_setup(CallConv::SystemV, &flags, &isa_flags, &frame)
+            .into_iter()
+            .chain(Abi::gen_clobber_save(CallConv::SystemV, &flags, &frame))
+        {
+            inst.emit(&mut buffer, &info, &mut state);
+        }
+
+        // A short-range branch to a deferred body trap makes an island due
+        // immediately after the first four-byte epilogue instruction. Filling
+        // the buffer directly keeps this regression small and deterministic.
+        let trap = buffer.defer_trap(ir::TrapCode::INTEGER_OVERFLOW);
+        buffer.use_label_at_offset(buffer.cur_offset(), trap, LabelUse::Branch14);
+        buffer.put4(0x36000000); // tbz w0, #0, trap
+        let lookahead = Inst::worst_case_size() + Inst::worst_case_island_growth();
+        while !buffer.island_needed(lookahead + 4) {
+            buffer.put4(0xd503201f); // nop
+        }
+        assert!(!buffer.island_needed(lookahead));
+
+        let mut epilogue: SmallInstVec<Inst> = smallvec::smallvec![];
+        epilogue.extend(Abi::gen_dwarf_unwind(SystemVUnwindInst::RememberState));
+        epilogue.extend(Abi::gen_epilogue_frame_restore(
+            CallConv::SystemV,
+            &flags,
+            &isa_flags,
+            &frame,
+        ));
+        epilogue.extend(Abi::gen_return(CallConv::SystemV, &isa_flags, &frame));
+        epilogue.extend(Abi::gen_dwarf_unwind(SystemVUnwindInst::RestoreState));
+        emit_epilogue(&epilogue, &mut buffer, &info, &mut state, None);
+        let buffer = buffer.finish(&Default::default(), &mut Default::default());
+
+        let mut start = None;
+        let mut end = None;
+        for &(offset, ref inst) in &buffer.unwind_info {
+            match inst {
+                UnwindInst::SystemV(SystemVUnwindInst::RememberState) => start = Some(offset),
+                UnwindInst::SystemV(SystemVUnwindInst::DefineCfa { .. })
+                | UnwindInst::SystemV(SystemVUnwindInst::SameValue { .. }) => {
+                    assert_eq!(offset, start.unwrap() + 4);
+                }
+                UnwindInst::SystemV(SystemVUnwindInst::RestoreState) => end = Some(offset),
+                _ => {}
+            }
+        }
+        let start = start.unwrap();
+        assert_eq!(end.unwrap(), start + 8);
+        assert_eq!(buffer.traps().len(), 1);
+        assert!(buffer.traps()[0].offset < start);
+        assert_eq!(
+            &buffer.data()[start as usize..],
+            &[0xfd, 0x7b, 0xc1, 0xa8, 0xc0, 0x03, 0x5f, 0xd6],
+        );
     }
 }

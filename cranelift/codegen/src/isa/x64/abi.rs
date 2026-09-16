@@ -5,8 +5,9 @@ use crate::ir::MemFlagsData;
 use crate::ir::{self, LibCall, Signature, TrapCode, types};
 use crate::ir::{ExternalName, types::*};
 use crate::isa;
+use crate::isa::unwind::{SystemVUnwindInst, UnwindInst};
 use crate::isa::winch;
-use crate::isa::{CallConv, unwind::UnwindInst, x64::inst::*, x64::settings as x64_settings};
+use crate::isa::{CallConv, x64::inst::*, x64::settings as x64_settings};
 use crate::machinst::*;
 use crate::settings;
 use alloc::borrow::ToOwned;
@@ -75,6 +76,12 @@ impl ABIMachineSpec for X64ABIMachineSpec {
     type I = Inst;
 
     type F = x64_settings::Flags;
+
+    fn gen_dwarf_unwind(inst: SystemVUnwindInst) -> Option<Self::I> {
+        Some(Inst::Unwind {
+            inst: UnwindInst::SystemV(inst),
+        })
+    }
 
     /// This is the limit for the size of argument and return-value areas on the
     /// stack. We place a reasonable limit here to avoid integer overflow issues
@@ -570,7 +577,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
 
     fn gen_epilogue_frame_restore(
         _call_conv: isa::CallConv,
-        _flags: &settings::Flags,
+        flags: &settings::Flags,
         _isa_flags: &x64_settings::Flags,
         _frame_layout: &FrameLayout,
     ) -> SmallInstVec<Self::I> {
@@ -586,6 +593,17 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         insts.push(Inst::External {
             inst: asm::inst::popq_o::new(Writable::from_reg(rbp)).into(),
         });
+        if flags.unwind_info() {
+            // RBP now belongs to the caller. RSP still points to the return
+            // address, including for `ret imm16` in the tail calling convention.
+            insts.extend(Self::gen_dwarf_unwind(SystemVUnwindInst::DefineCfa {
+                reg: regs::rsp().to_real_reg().unwrap(),
+                offset: 8,
+            }));
+            insts.extend(Self::gen_dwarf_unwind(SystemVUnwindInst::SameValue {
+                reg: regs::rbp().to_real_reg().unwrap(),
+            }));
+        }
         insts
     }
 
@@ -762,7 +780,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
 
     fn gen_clobber_restore(
         _call_conv: isa::CallConv,
-        _flags: &settings::Flags,
+        flags: &settings::Flags,
         frame_layout: &FrameLayout,
     ) -> SmallVec<[Self::I; 16]> {
         let mut insts = SmallVec::new();
@@ -789,6 +807,12 @@ impl ABIMachineSpec for X64ABIMachineSpec {
                 Writable::from_reg(rreg.into()),
                 ExtKind::None,
             ));
+
+            if flags.unwind_info() {
+                insts.extend(Self::gen_dwarf_unwind(SystemVUnwindInst::SameValue {
+                    reg: rreg,
+                }));
+            }
 
             cur_offset += ty.bytes();
         }

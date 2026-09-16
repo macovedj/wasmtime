@@ -15,9 +15,13 @@ block0(v0: i64, v1: i64, v2: i64, v3: i64):
 ;   unwind DefineNewFrame { offset_upward_to_caller_sp: 16, offset_downward_to_clobbers: 0 }
 ; block0:
 ;   movq %rcx, %rax
+;   unwind SystemV(RememberState)
 ;   movq %rbp, %rsp
 ;   popq %rbp
+;   unwind SystemV(DefineCfa { reg: p4i, offset: 8 })
+;   unwind SystemV(SameValue { reg: p5i })
 ;   retq
+;   unwind SystemV(RestoreState)
 ;
 ; Disassembled:
 ; block0: ; offset 0x0
@@ -41,9 +45,13 @@ block0(v0: i64, v1: i64, v2: i64, v3: i64):
 ;   unwind DefineNewFrame { offset_upward_to_caller_sp: 16, offset_downward_to_clobbers: 0 }
 ; block0:
 ;   movq %rdx, %rax
+;   unwind SystemV(RememberState)
 ;   movq %rbp, %rsp
 ;   popq %rbp
+;   unwind SystemV(DefineCfa { reg: p4i, offset: 8 })
+;   unwind SystemV(SameValue { reg: p5i })
 ;   retq
+;   unwind SystemV(RestoreState)
 ;
 ; Disassembled:
 ; block0: ; offset 0x0
@@ -67,9 +75,13 @@ block0(v0: i64, v1: i64, v2: i64, v3: i64):
 ;   unwind DefineNewFrame { offset_upward_to_caller_sp: 16, offset_downward_to_clobbers: 0 }
 ; block0:
 ;   movq %r8, %rax
+;   unwind SystemV(RememberState)
 ;   movq %rbp, %rsp
 ;   popq %rbp
+;   unwind SystemV(DefineCfa { reg: p4i, offset: 8 })
+;   unwind SystemV(SameValue { reg: p5i })
 ;   retq
+;   unwind SystemV(RestoreState)
 ;
 ; Disassembled:
 ; block0: ; offset 0x0
@@ -93,9 +105,13 @@ block0(v0: i64, v1: i64, v2: i64, v3: i64):
 ;   unwind DefineNewFrame { offset_upward_to_caller_sp: 16, offset_downward_to_clobbers: 0 }
 ; block0:
 ;   movq %r9, %rax
+;   unwind SystemV(RememberState)
 ;   movq %rbp, %rsp
 ;   popq %rbp
+;   unwind SystemV(DefineCfa { reg: p4i, offset: 8 })
+;   unwind SystemV(SameValue { reg: p5i })
 ;   retq
+;   unwind SystemV(RestoreState)
 ;
 ; Disassembled:
 ; block0: ; offset 0x0
@@ -119,9 +135,13 @@ block0(v0: i64, v1: i64, v2: f64, v3: i64):
 ;   unwind DefineNewFrame { offset_upward_to_caller_sp: 16, offset_downward_to_clobbers: 0 }
 ; block0:
 ;   movdqa %xmm2, %xmm0
+;   unwind SystemV(RememberState)
 ;   movq %rbp, %rsp
 ;   popq %rbp
+;   unwind SystemV(DefineCfa { reg: p4i, offset: 8 })
+;   unwind SystemV(SameValue { reg: p5i })
 ;   retq
+;   unwind SystemV(RestoreState)
 ;
 ; Disassembled:
 ; block0: ; offset 0x0
@@ -145,9 +165,13 @@ block0(v0: i64, v1: i64, v2: f64, v3: i64):
 ;   unwind DefineNewFrame { offset_upward_to_caller_sp: 16, offset_downward_to_clobbers: 0 }
 ; block0:
 ;   movq %r9, %rax
+;   unwind SystemV(RememberState)
 ;   movq %rbp, %rsp
 ;   popq %rbp
+;   unwind SystemV(DefineCfa { reg: p4i, offset: 8 })
+;   unwind SystemV(SameValue { reg: p5i })
 ;   retq
+;   unwind SystemV(RestoreState)
 ;
 ; Disassembled:
 ; block0: ; offset 0x0
@@ -181,9 +205,13 @@ block0(v0: i64, v1: i64, v2: i64, v3: i64, v4: i64, v5: i64):
 ;   unwind DefineNewFrame { offset_upward_to_caller_sp: 16, offset_downward_to_clobbers: 0 }
 ; block0:
 ;   movq <offset:0>+-8(%rbp), %rax
+;   unwind SystemV(RememberState)
 ;   movq %rbp, %rsp
 ;   popq %rbp
+;   unwind SystemV(DefineCfa { reg: p4i, offset: 8 })
+;   unwind SystemV(SameValue { reg: p5i })
 ;   retq
+;   unwind SystemV(RestoreState)
 ;
 ; Disassembled:
 ; block0: ; offset 0x0
@@ -208,9 +236,13 @@ block0(v0: i128, v1: i64, v2: i128, v3: i128):
 ; block0:
 ;   movq <offset:0>+-0x18(%rbp), %rax
 ;   movq <offset:0>+-0x10(%rbp), %rdx
+;   unwind SystemV(RememberState)
 ;   movq %rbp, %rsp
 ;   popq %rbp
+;   unwind SystemV(DefineCfa { reg: p4i, offset: 8 })
+;   unwind SystemV(SameValue { reg: p5i })
 ;   retq
+;   unwind SystemV(RestoreState)
 ;
 ; Disassembled:
 ; block0: ; offset 0x0
@@ -249,10 +281,14 @@ block0(v0: i64):
 ;   movq %rcx, %rdx
 ;   movdqa %xmm3, %xmm2
 ;   call    *%r8
+;   unwind SystemV(RememberState)
 ;   addq $0x30, %rsp
 ;   movq %rbp, %rsp
 ;   popq %rbp
+;   unwind SystemV(DefineCfa { reg: p4i, offset: 8 })
+;   unwind SystemV(SameValue { reg: p5i })
 ;   retq
+;   unwind SystemV(RestoreState)
 ;
 ; Disassembled:
 ; block0: ; offset 0x0
@@ -398,20 +434,34 @@ block0(v0: i64):
 ;   addsd %xmm5, %xmm2
 ;   addsd %xmm2, %xmm0
 ;   addsd %xmm7, %xmm0
+;   unwind SystemV(RememberState)
 ;   movdqu 0x40(%rsp), %xmm6
+;   unwind SystemV(SameValue { reg: p6f })
 ;   movdqu 0x50(%rsp), %xmm7
+;   unwind SystemV(SameValue { reg: p7f })
 ;   movdqu 0x60(%rsp), %xmm8
+;   unwind SystemV(SameValue { reg: p8f })
 ;   movdqu 0x70(%rsp), %xmm9
+;   unwind SystemV(SameValue { reg: p9f })
 ;   movdqu 0x80(%rsp), %xmm10
+;   unwind SystemV(SameValue { reg: p10f })
 ;   movdqu 0x90(%rsp), %xmm11
+;   unwind SystemV(SameValue { reg: p11f })
 ;   movdqu 0xa0(%rsp), %xmm12
+;   unwind SystemV(SameValue { reg: p12f })
 ;   movdqu 0xb0(%rsp), %xmm13
+;   unwind SystemV(SameValue { reg: p13f })
 ;   movdqu 0xc0(%rsp), %xmm14
+;   unwind SystemV(SameValue { reg: p14f })
 ;   movdqu 0xd0(%rsp), %xmm15
+;   unwind SystemV(SameValue { reg: p15f })
 ;   addq $0xe0, %rsp
 ;   movq %rbp, %rsp
 ;   popq %rbp
+;   unwind SystemV(DefineCfa { reg: p4i, offset: 8 })
+;   unwind SystemV(SameValue { reg: p5i })
 ;   retq
+;   unwind SystemV(RestoreState)
 ;
 ; Disassembled:
 ; block0: ; offset 0x0

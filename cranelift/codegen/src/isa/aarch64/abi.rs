@@ -11,7 +11,7 @@ use crate::ir::types::*;
 use crate::ir::{ExternalName, LibCall, Signature, dynamic_to_fixed};
 use crate::isa;
 use crate::isa::aarch64::{inst::*, settings as aarch64_settings};
-use crate::isa::unwind::UnwindInst;
+use crate::isa::unwind::{SystemVUnwindInst, UnwindInst};
 use crate::isa::winch;
 use crate::machinst::*;
 use crate::settings;
@@ -690,7 +690,7 @@ impl ABIMachineSpec for AArch64MachineDeps {
 
     fn gen_epilogue_frame_restore(
         call_conv: isa::CallConv,
-        _flags: &settings::Flags,
+        flags: &settings::Flags,
         _isa_flags: &aarch64_settings::Flags,
         frame_layout: &FrameLayout,
     ) -> SmallInstVec<Inst> {
@@ -711,15 +711,50 @@ impl ABIMachineSpec for AArch64MachineDeps {
                 },
                 flags: MemFlagsData::trusted(),
             });
+            if flags.unwind_info() {
+                // FP and LR now hold their caller values. In particular, the
+                // CFA must no longer use FP to describe this frame.
+                for reg in [fp_reg(), link_reg()] {
+                    insts.push(Inst::Unwind {
+                        inst: UnwindInst::SystemV(SystemVUnwindInst::SameValue {
+                            reg: reg.to_real_reg().unwrap(),
+                        }),
+                    });
+                }
+                insts.push(Inst::Unwind {
+                    inst: UnwindInst::SystemV(SystemVUnwindInst::DefineCfa {
+                        reg: stack_reg().to_real_reg().unwrap(),
+                        offset: (frame_layout.tail_args_size - frame_layout.incoming_args_size)
+                            .try_into()
+                            .unwrap(),
+                    }),
+                });
+            }
         }
 
         if call_conv == isa::CallConv::Tail && frame_layout.tail_args_size > 0 {
             insts.extend(Self::gen_sp_reg_adjust(
                 frame_layout.tail_args_size.try_into().unwrap(),
             ));
+            if flags.unwind_info() {
+                // The callee-pop convention leaves SP above the entry CFA by
+                // the incoming argument area size.
+                insts.push(Inst::Unwind {
+                    inst: UnwindInst::SystemV(SystemVUnwindInst::DefineCfa {
+                        reg: stack_reg().to_real_reg().unwrap(),
+                        offset: -i32::try_from(frame_layout.incoming_args_size).unwrap(),
+                    }),
+                });
+            }
         }
 
         insts
+    }
+
+    fn gen_dwarf_unwind(inst: SystemVUnwindInst) -> Option<Inst> {
+        Some(Inst::Unwind {
+            inst: UnwindInst::SystemV(inst),
+        })
     }
 
     fn gen_return(
@@ -1019,105 +1054,10 @@ impl ABIMachineSpec for AArch64MachineDeps {
 
     fn gen_clobber_restore(
         call_conv: isa::CallConv,
-        _flags: &settings::Flags,
+        flags: &settings::Flags,
         frame_layout: &FrameLayout,
     ) -> SmallVec<[Inst; 16]> {
-        let mut insts = SmallVec::new();
-        let (clobbered_int, clobbered_vec) = frame_layout.clobbered_callee_saves_by_class();
-
-        // Free the fixed frame if necessary.
-        let stack_size = frame_layout.fixed_frame_storage_size + frame_layout.outgoing_args_size;
-        if stack_size > 0 {
-            insts.extend(Self::gen_sp_reg_adjust(stack_size as i32));
-        }
-
-        if call_conv == isa::CallConv::PreserveAll {
-            for reg in clobbered_vec.iter() {
-                let inst = Inst::FpuLoad128 {
-                    rd: reg.map(|r| r.into()),
-                    mem: AMode::SPPostIndexed {
-                        simm9: SImm9::maybe_from_i64(16).unwrap(),
-                    },
-                    flags: MemFlagsData::trusted(),
-                };
-                insts.push(inst);
-                // N.B.: no unwind info; we don't have a way to
-                // represent "full vector register saved" anyway.
-            }
-        } else {
-            let load_vec_reg_half = |rd| Inst::FpuLoad64 {
-                rd,
-                mem: AMode::SPPostIndexed {
-                    simm9: SImm9::maybe_from_i64(16).unwrap(),
-                },
-                flags: MemFlagsData::trusted(),
-            };
-            let load_vec_reg_half_pair = |rt, rt2| Inst::FpuLoadP64 {
-                rt,
-                rt2,
-                mem: PairAMode::SPPostIndexed {
-                    simm7: SImm7Scaled::maybe_from_i64(16, F64).unwrap(),
-                },
-                flags: MemFlagsData::trusted(),
-            };
-
-            let mut iter = clobbered_vec.chunks_exact(2);
-
-            while let Some([rt, rt2]) = iter.next() {
-                let rt: Writable<Reg> = rt.map(|r| r.into());
-                let rt2: Writable<Reg> = rt2.map(|r| r.into());
-
-                debug_assert_eq!(rt.to_reg().class(), RegClass::Float);
-                debug_assert_eq!(rt2.to_reg().class(), RegClass::Float);
-                insts.push(load_vec_reg_half_pair(rt, rt2));
-            }
-
-            debug_assert!(iter.remainder().len() <= 1);
-
-            if let [rd] = iter.remainder() {
-                let rd: Writable<Reg> = rd.map(|r| r.into());
-
-                debug_assert_eq!(rd.to_reg().class(), RegClass::Float);
-                insts.push(load_vec_reg_half(rd));
-            }
-        }
-
-        let mut iter = clobbered_int.chunks_exact(2);
-
-        while let Some([rt, rt2]) = iter.next() {
-            let rt: Writable<Reg> = rt.map(|r| r.into());
-            let rt2: Writable<Reg> = rt2.map(|r| r.into());
-
-            debug_assert_eq!(rt.to_reg().class(), RegClass::Int);
-            debug_assert_eq!(rt2.to_reg().class(), RegClass::Int);
-            // ldp rt, rt2, [sp], #16
-            insts.push(Inst::LoadP64 {
-                rt,
-                rt2,
-                mem: PairAMode::SPPostIndexed {
-                    simm7: SImm7Scaled::maybe_from_i64(16, I64).unwrap(),
-                },
-                flags: MemFlagsData::trusted(),
-            });
-        }
-
-        debug_assert!(iter.remainder().len() <= 1);
-
-        if let [rd] = iter.remainder() {
-            let rd: Writable<Reg> = rd.map(|r| r.into());
-
-            debug_assert_eq!(rd.to_reg().class(), RegClass::Int);
-            // ldr rd, [sp], #16
-            insts.push(Inst::ULoad64 {
-                rd,
-                mem: AMode::SPPostIndexed {
-                    simm9: SImm9::maybe_from_i64(16).unwrap(),
-                },
-                flags: MemFlagsData::trusted(),
-            });
-        }
-
-        insts
+        Self::gen_clobber_restore_impl(call_conv, frame_layout, flags.unwind_info())
     }
 
     fn gen_memcpy<F: FnMut(Type) -> Writable<Reg>>(
@@ -1312,6 +1252,141 @@ impl ABIMachineSpec for AArch64MachineDeps {
 }
 
 impl AArch64MachineDeps {
+    pub(crate) fn gen_clobber_restore_impl(
+        call_conv: isa::CallConv,
+        frame_layout: &FrameLayout,
+        unwind_info: bool,
+    ) -> SmallVec<[Inst; 16]> {
+        let mut insts = SmallVec::new();
+        let (clobbered_int, clobbered_vec) = frame_layout.clobbered_callee_saves_by_class();
+
+        // Free the fixed frame if necessary.
+        let stack_size = frame_layout.fixed_frame_storage_size + frame_layout.outgoing_args_size;
+        if stack_size > 0 {
+            insts.extend(Self::gen_sp_reg_adjust(stack_size as i32));
+        }
+
+        if call_conv == isa::CallConv::PreserveAll {
+            for reg in clobbered_vec.iter() {
+                let inst = Inst::FpuLoad128 {
+                    rd: reg.map(|r| r.into()),
+                    mem: AMode::SPPostIndexed {
+                        simm9: SImm9::maybe_from_i64(16).unwrap(),
+                    },
+                    flags: MemFlagsData::trusted(),
+                };
+                insts.push(inst);
+                // N.B.: no unwind info; we don't have a way to
+                // represent "full vector register saved" anyway.
+            }
+        } else {
+            let load_vec_reg_half = |rd| Inst::FpuLoad64 {
+                rd,
+                mem: AMode::SPPostIndexed {
+                    simm9: SImm9::maybe_from_i64(16).unwrap(),
+                },
+                flags: MemFlagsData::trusted(),
+            };
+            let load_vec_reg_half_pair = |rt, rt2| Inst::FpuLoadP64 {
+                rt,
+                rt2,
+                mem: PairAMode::SPPostIndexed {
+                    simm7: SImm7Scaled::maybe_from_i64(16, F64).unwrap(),
+                },
+                flags: MemFlagsData::trusted(),
+            };
+
+            let mut iter = clobbered_vec.chunks_exact(2);
+
+            while let Some([rt, rt2]) = iter.next() {
+                let rt: Writable<Reg> = rt.map(|r| r.into());
+                let rt2: Writable<Reg> = rt2.map(|r| r.into());
+
+                debug_assert_eq!(rt.to_reg().class(), RegClass::Float);
+                debug_assert_eq!(rt2.to_reg().class(), RegClass::Float);
+                insts.push(load_vec_reg_half_pair(rt, rt2));
+                if unwind_info {
+                    for reg in [rt, rt2] {
+                        insts.push(Inst::Unwind {
+                            inst: UnwindInst::SystemV(SystemVUnwindInst::SameValue {
+                                reg: reg.to_reg().to_real_reg().unwrap(),
+                            }),
+                        });
+                    }
+                }
+            }
+
+            debug_assert!(iter.remainder().len() <= 1);
+
+            if let [rd] = iter.remainder() {
+                let rd: Writable<Reg> = rd.map(|r| r.into());
+
+                debug_assert_eq!(rd.to_reg().class(), RegClass::Float);
+                insts.push(load_vec_reg_half(rd));
+                if unwind_info {
+                    insts.push(Inst::Unwind {
+                        inst: UnwindInst::SystemV(SystemVUnwindInst::SameValue {
+                            reg: rd.to_reg().to_real_reg().unwrap(),
+                        }),
+                    });
+                }
+            }
+        }
+
+        let mut iter = clobbered_int.chunks_exact(2);
+
+        while let Some([rt, rt2]) = iter.next() {
+            let rt: Writable<Reg> = rt.map(|r| r.into());
+            let rt2: Writable<Reg> = rt2.map(|r| r.into());
+
+            debug_assert_eq!(rt.to_reg().class(), RegClass::Int);
+            debug_assert_eq!(rt2.to_reg().class(), RegClass::Int);
+            // ldp rt, rt2, [sp], #16
+            insts.push(Inst::LoadP64 {
+                rt,
+                rt2,
+                mem: PairAMode::SPPostIndexed {
+                    simm7: SImm7Scaled::maybe_from_i64(16, I64).unwrap(),
+                },
+                flags: MemFlagsData::trusted(),
+            });
+            if unwind_info {
+                for reg in [rt, rt2] {
+                    insts.push(Inst::Unwind {
+                        inst: UnwindInst::SystemV(SystemVUnwindInst::SameValue {
+                            reg: reg.to_reg().to_real_reg().unwrap(),
+                        }),
+                    });
+                }
+            }
+        }
+
+        debug_assert!(iter.remainder().len() <= 1);
+
+        if let [rd] = iter.remainder() {
+            let rd: Writable<Reg> = rd.map(|r| r.into());
+
+            debug_assert_eq!(rd.to_reg().class(), RegClass::Int);
+            // ldr rd, [sp], #16
+            insts.push(Inst::ULoad64 {
+                rd,
+                mem: AMode::SPPostIndexed {
+                    simm9: SImm9::maybe_from_i64(16).unwrap(),
+                },
+                flags: MemFlagsData::trusted(),
+            });
+            if unwind_info {
+                insts.push(Inst::Unwind {
+                    inst: UnwindInst::SystemV(SystemVUnwindInst::SameValue {
+                        reg: rd.to_reg().to_real_reg().unwrap(),
+                    }),
+                });
+            }
+        }
+
+        insts
+    }
+
     fn gen_probestack_unroll(insts: &mut SmallInstVec<Inst>, guard_size: u32, probe_count: u32) {
         // When manually unrolling adjust the stack pointer and then write a zero
         // to the stack at that offset. This generates something like
