@@ -902,7 +902,7 @@ fn clamp_keep_alive_count(value: u32) -> u32 {
     value.clamp(MIN_CNT, MAX_CNT)
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
     use crate::WasiCtxBuilder;
