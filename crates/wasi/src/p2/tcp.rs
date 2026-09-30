@@ -3,11 +3,12 @@ use crate::p2::bindings::sockets::network::ErrorCode;
 use crate::p2::{
     DynInputStream, DynOutputStream, InputStream, OutputStream, Pollable, SocketResult, StreamError,
 };
-use crate::runtime::poll_now;
+use crate::runtime::{poll_now, with_ambient_tokio_runtime};
 use crate::sockets::{
-    MaybeSpawned, TcpListenStream, TcpReceiveStream, TcpSendStream, TcpSocket as P3Socket,
+    MaybeReady, MaybeSpawned, TcpListenStream, TcpReceiveStream, TcpSendStream,
+    TcpSocket as P3Socket,
 };
-use std::future::poll_fn;
+use std::future::{Future, poll_fn};
 use std::mem;
 use std::net::Shutdown;
 use std::sync::Arc;
@@ -149,6 +150,8 @@ impl From<WriteError> for StreamError {
 enum WriteState {
     Ready(TcpSendStream, usize),
     Writing(MaybeSpawned<Result<TcpSendStream, WriteError>>),
+    // Receive the sender back from a write handed off on output-stream drop.
+    Draining(MaybeReady<Result<TcpSendStream, WriteError>>),
     Closing(MaybeSpawned<Result<(), WriteError>>),
     Closed(WriteError),
 }
@@ -222,7 +225,10 @@ impl WriteState {
         // always be delivered to the OS as soon as possible. There's nothing
         // for `flush` to do here that will speed up that process.
         match self {
-            WriteState::Ready(..) | WriteState::Writing(_) | WriteState::Closing(_) => Ok(()),
+            WriteState::Ready(..)
+            | WriteState::Writing(_)
+            | WriteState::Draining(_)
+            | WriteState::Closing(_) => Ok(()),
             WriteState::Closed(e) => Err(e.clone().into()),
         }
     }
@@ -234,6 +240,14 @@ impl WriteState {
 
             // Schedule the shutdown after the current write has finished:
             WriteState::Writing(write) => {
+                WriteState::Closing(MaybeSpawned::poll_or_spawn(async move {
+                    _ = write.into_future().await?;
+                    Ok(())
+                }))
+            }
+
+            // The output stream was dropped, but its write is still draining.
+            WriteState::Draining(write) => {
                 WriteState::Closing(MaybeSpawned::poll_or_spawn(async move {
                     _ = write.into_future().await?;
                     Ok(())
@@ -259,6 +273,16 @@ impl WriteState {
                     Err(err) => WriteState::Closed(err),
                 };
             }
+            WriteState::Draining(write) => {
+                ready!(write.poll_ready(cx));
+                let WriteState::Draining(write) = self.take() else {
+                    unreachable!()
+                };
+                *self = match write.unwrap_ready() {
+                    Ok(stream) => WriteState::Ready(stream, 0),
+                    Err(err) => WriteState::Closed(err),
+                };
+            }
             WriteState::Closing(close) => {
                 ready!(close.poll_ready(cx));
                 let WriteState::Closing(close) = self.take() else {
@@ -277,7 +301,9 @@ impl WriteState {
                 Poll::Ready(()) => Poll::Ready(Ok((stream, permit))),
                 Poll::Pending => Poll::Pending,
             },
-            WriteState::Writing(..) | WriteState::Closing(..) => Poll::Pending,
+            WriteState::Writing(..) | WriteState::Draining(..) | WriteState::Closing(..) => {
+                Poll::Pending
+            }
             WriteState::Closed(e) => Poll::Ready(Err(e.clone().into())),
         }
     }
@@ -288,6 +314,12 @@ struct TcpWriter(Arc<Mutex<WriteState>>);
 impl TcpWriter {
     fn new(stream: TcpSendStream) -> Self {
         Self(Arc::new(Mutex::new(WriteState::Ready(stream, 0))))
+    }
+
+    fn detach(future: impl Future<Output = ()> + Send + 'static) {
+        // Draining a dropped stream deliberately outlives the resources, so
+        // use Tokio's detached handle instead of an AbortOnDropJoinHandle.
+        drop(with_ambient_tokio_runtime(|| tokio::spawn(future)));
     }
 }
 
@@ -306,9 +338,34 @@ impl OutputStream for TcpWriter {
     }
 
     async fn cancel(&mut self) {
-        // Wait for background writes to finish in order to prevent silently
-        // dropping data that (from the guest's perspective) was already written.
-        self.ready().await
+        let mut state = self.0.lock().unwrap();
+        if matches!(
+            *state,
+            WriteState::Ready(..) | WriteState::Draining(..) | WriteState::Closed(..)
+        ) {
+            return;
+        }
+
+        // Preserve writes already accepted from the guest without making drop
+        // wait for the peer to read. Hand the task off so dropping the socket
+        // cannot abort it. A channel keeps the completed send stream owned by
+        // the socket if it is still alive; otherwise the send stream is dropped
+        // after draining, shutting down the connection's write side.
+        match state.take() {
+            WriteState::Writing(write) => {
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                *state = WriteState::Draining(MaybeReady::new(Box::pin(async move {
+                    receiver.await.unwrap_or(Err(WriteError::Closed))
+                })));
+                Self::detach(async move {
+                    let _ = sender.send(write.into_future().await);
+                });
+            }
+            WriteState::Closing(close) => Self::detach(async move {
+                let _ = close.into_future().await;
+            }),
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -316,5 +373,60 @@ impl OutputStream for TcpWriter {
 impl Pollable for TcpWriter {
     async fn ready(&mut self) {
         poll_fn(|cx| self.0.lock().unwrap().poll_ready(cx).map(|_| ())).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::sync::oneshot;
+
+    async fn cancel_pending_write(shutdown: bool) {
+        let (resume, paused) = oneshot::channel();
+        let (finished, completion) = oneshot::channel();
+        let write = MaybeSpawned::poll_or_spawn(async move {
+            paused.await.unwrap();
+            finished.send(()).unwrap();
+            Err(WriteError::Closed)
+        });
+        let mut writer = TcpWriter(Arc::new(Mutex::new(WriteState::Writing(write))));
+        // The TCP socket keeps its own clone of the writer.
+        let socket_writer = writer.clone();
+        if shutdown {
+            writer.0.lock().unwrap().shutdown();
+        }
+
+        // Drop must return in one poll even though the write cannot finish yet.
+        assert!(
+            futures::future::poll_immediate(writer.cancel())
+                .await
+                .is_some()
+        );
+        // Cancellation stays idempotent while the handed-off task is pending.
+        assert!(
+            futures::future::poll_immediate(writer.cancel())
+                .await
+                .is_some()
+        );
+        drop(writer);
+        drop(socket_writer);
+
+        // Dropping every resource must not abort the write that was handed off.
+        resume.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), completion)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancel_does_not_wait_for_pending_write() {
+        cancel_pending_write(false).await;
+    }
+
+    #[tokio::test]
+    async fn cancel_does_not_wait_for_pending_shutdown() {
+        cancel_pending_write(true).await;
     }
 }
