@@ -530,10 +530,17 @@ async fn async_cancel_host_task_drop_before_completion_traps() -> Result<()> {
     test_cancel_host_task(HostTaskCancelMode::DropDuringAsyncCancel).await
 }
 
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn async_cancel_host_task_drop_then_reuse_traps() -> Result<()> {
+    test_cancel_host_task(HostTaskCancelMode::DropThenReuseDuringAsyncCancel).await
+}
+
 enum HostTaskCancelMode {
     Sync,
     Async,
     DropDuringAsyncCancel,
+    DropThenReuseDuringAsyncCancel,
 }
 
 async fn test_cancel_host_task(mode: HostTaskCancelMode) -> Result<()> {
@@ -545,18 +552,40 @@ async fn test_cancel_host_task(mode: HostTaskCancelMode) -> Result<()> {
 
     let mut store = Store::new(&engine, ());
     let async_cancel = !matches!(mode, HostTaskCancelMode::Sync);
-    let drop_early = matches!(mode, HostTaskCancelMode::DropDuringAsyncCancel);
+    let drop_early = matches!(
+        mode,
+        HostTaskCancelMode::DropDuringAsyncCancel
+            | HostTaskCancelMode::DropThenReuseDuringAsyncCancel
+    );
     let cancel_option = if async_cancel { "async" } else { "" };
     let expected_cancel_status = if async_cancel { -1 } else { 4 };
-    let early_drop = if drop_early {
-        r#"
+    let early_drop = match mode {
+        HostTaskCancelMode::DropDuringAsyncCancel => {
+            r#"
                     ;; Cancellation returned BLOCKED, so dropping must trap.
                     (call $drop (local.get $task))
                     ;; Stop here if the drop was incorrectly accepted.
                     unreachable
         "#
-    } else {
-        ""
+        }
+        HostTaskCancelMode::DropThenReuseDuringAsyncCancel => {
+            r#"
+                    ;; Dropping subtask A while cancellation is pending must trap.
+                    (call $drop (local.get $task))
+
+                    ;; If the drop is incorrectly accepted, start subtask B before
+                    ;; yielding, allowing it to reuse A's task-table entry.
+                    (local.set $task (call $f))
+                    (if (i32.ne (i32.and (local.get $task) (i32.const 0xf)) (i32.const 1))
+                        (then unreachable)) ;; STARTED
+                    (local.set $task (i32.shr_u (local.get $task) (i32.const 4)))
+
+                    ;; The wait below now targets B, which was never cancelled and
+                    ;; whose host future never completes. A RETURN_CANCELLED event
+                    ;; for B therefore exposes A's stale completion reaching B.
+        "#
+        }
+        HostTaskCancelMode::Sync | HostTaskCancelMode::Async => "",
     };
     let component = Component::new(
         &engine,
@@ -653,17 +682,20 @@ async fn test_cancel_host_task(mode: HostTaskCancelMode) -> Result<()> {
     })?;
     let instance = linker.instantiate_async(&mut store, &component).await?;
     let func = instance.get_typed_func::<(), ()>(&mut store, "f")?;
-    let result = store
-        .run_concurrent(async |store| -> wasmtime::Result<()> {
-            func.call_concurrent(store, ()).await?;
+    let result = store.run_concurrent(async |store| -> wasmtime::Result<()> {
+        func.call_concurrent(store, ()).await?;
 
-            for _ in 0..5 {
-                tokio::task::yield_now().await;
-            }
-            Ok(())
-        })
-        .await
-        .and_then(std::convert::identity);
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+        Ok(())
+    });
+    let result = if matches!(mode, HostTaskCancelMode::DropThenReuseDuringAsyncCancel) {
+        tokio::time::timeout(std::time::Duration::from_secs(30), result).await?
+    } else {
+        result.await
+    }
+    .and_then(std::convert::identity);
 
     if drop_early {
         let err = result.unwrap_err();
