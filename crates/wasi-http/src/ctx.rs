@@ -485,11 +485,7 @@ fn is_address_family_unsupported(err: &std::io::Error) -> bool {
     false
 }
 
-#[cfg(all(
-    test,
-    feature = "default-send-request",
-    any(feature = "p2", feature = "p3")
-))]
+#[cfg(test)]
 #[path = "ctx_tests.rs"]
 mod tests;
 

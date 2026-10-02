@@ -11,12 +11,10 @@ fn assert_codes(error: Error, expected: Error) {
         ctx: &mut ctx,
         table: &mut table,
     };
-    #[cfg(feature = "p3")]
     assert_eq!(
         format!("{:?}", Error::from(view.error_to_p3(&error))),
         format!("{expected:?}"),
     );
-    #[cfg(feature = "p2")]
     assert_eq!(
         format!("{:?}", Error::from(view.error_to_p2(error))),
         format!("{expected:?}"),
@@ -142,19 +140,15 @@ fn tls_transport_and_protocol_errors() {
 fn custom_error_hooks_still_take_precedence() {
     struct Hooks;
     impl WasiHttpHooks for Hooks {
-        #[cfg(feature = "p2")]
         fn p2_error_from_connect(&mut self, _: &io::Error) -> p2::ErrorCode {
             p2::ErrorCode::ConfigurationError
         }
-        #[cfg(feature = "p3")]
         fn p3_error_from_connect(&mut self, _: &io::Error) -> p3::ErrorCode {
             p3::ErrorCode::ConfigurationError
         }
-        #[cfg(feature = "p2")]
         fn p2_error_from_tls(&mut self, _: &io::Error) -> p2::ErrorCode {
             p2::ErrorCode::ConfigurationError
         }
-        #[cfg(feature = "p3")]
         fn p3_error_from_tls(&mut self, _: &io::Error) -> p3::ErrorCode {
             p3::ErrorCode::ConfigurationError
         }
@@ -173,12 +167,10 @@ fn custom_error_hooks_still_take_precedence() {
             rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer),
         )),
     ] {
-        #[cfg(feature = "p3")]
         assert!(matches!(
             view.error_to_p3(&error),
             p3::ErrorCode::ConfigurationError
         ));
-        #[cfg(feature = "p2")]
         assert!(matches!(
             view.error_to_p2(error),
             p2::ErrorCode::ConfigurationError
