@@ -5147,6 +5147,7 @@ dependencies = [
  "http-body",
  "http-body-util",
  "hyper",
+ "libc",
  "pin-project-lite",
  "rustls",
  "sha2",
@@ -5164,6 +5165,7 @@ dependencies = [
  "wasmtime-wasi-http",
  "wasmtime-wasi-io",
  "webpki-roots",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
