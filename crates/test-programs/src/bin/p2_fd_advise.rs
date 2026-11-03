@@ -16,6 +16,11 @@ fn test_fd_advise(dir: &Descriptor) {
     let stat = file.stat().expect("failed to stat");
     assert_eq!(stat.size, 0, "file size should be 0");
 
+    // WillNeed on an empty file advises a range starting at end of file,
+    // which should succeed: the advice is only a hint.
+    file.advise(0, 0, Advice::WillNeed)
+        .expect("failed advise on empty file");
+
     // set_size it bigger
     file.set_size(100).expect("setting size");
 
@@ -24,6 +29,12 @@ fn test_fd_advise(dir: &Descriptor) {
 
     // Advise the kernel
     file.advise(10, 50, Advice::Normal).expect("failed advise");
+
+    // WillNeed at or past end of file should succeed for the same reason.
+    file.advise(100, 0, Advice::WillNeed)
+        .expect("failed advise at end of file");
+    file.advise(200, 50, Advice::WillNeed)
+        .expect("failed advise past end of file");
 
     // Advise shouldn't change size
     let stat = file.stat().expect("failed to stat 3");

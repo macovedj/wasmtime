@@ -37,7 +37,14 @@ pub(crate) fn advise(file: &File, offset: u64, len: u64, advice: Advice) -> io::
         target_vendor = "apple" => {
             match advice {
                 Advice::WillNeed => {
-                    rustix::fs::fcntl_rdadvise(file, offset, len)?;
+                    match rustix::fs::fcntl_rdadvise(file, offset, len) {
+                        // `F_RDADVISE` fails with `EFBIG` when the range
+                        // starts at or past end of file. That's accepted by
+                        // `posix_fadvise`, and advice is only a hint, so
+                        // treat it as success.
+                        Err(rustix::io::Errno::FBIG) => {}
+                        other => other?,
+                    }
                 }
                 Advice::Normal |
                 Advice::Sequential |
