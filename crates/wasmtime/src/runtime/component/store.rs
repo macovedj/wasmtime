@@ -85,6 +85,11 @@ pub struct ComponentStoreData {
     /// Caps the size of the allocations made on the host to this amount
     /// effectively.
     hostcall_fuel: usize,
+
+    /// The most live threads created by `thread.new-indirect` that each
+    /// top-level component instance may hold, or `None` for no such limit.
+    /// See `Store::set_max_component_instance_threads`.
+    max_component_instance_threads: Option<usize>,
 }
 
 /// State tracking for tasks within components.
@@ -135,6 +140,7 @@ impl ComponentStoreData {
                 ComponentTaskState::NotConcurrent(Default::default())
             },
             hostcall_fuel: DEFAULT_HOSTCALL_FUEL,
+            max_component_instance_threads: engine.config().max_component_instance_threads,
             lazy_lenders: try_new::<Box<_>>([VMResourceIndex::EMPTY; LAZY_LENDERS_CAPACITY])?,
         })
     }
@@ -629,6 +635,14 @@ impl StoreOpaque {
         self.component_data_mut().handle_counter.set_limit(limit);
     }
 
+    pub(crate) fn max_component_instance_threads(&self) -> Option<usize> {
+        self.component_data().max_component_instance_threads
+    }
+
+    pub(crate) fn set_max_component_instance_threads(&mut self, limit: Option<usize>) {
+        self.component_data_mut().max_component_instance_threads = limit;
+    }
+
     #[cfg(feature = "component-model-async")]
     fn concurrent_resource_table(&mut self) -> Option<&mut ResourceTable> {
         if self.concurrency_support() {
@@ -724,6 +738,54 @@ impl<T> Store<T> {
         self.as_context_mut().set_max_component_handles(limit)
     }
 
+    /// Returns the maximum number of live threads created by
+    /// `thread.new-indirect` permitted in each component instance in this
+    /// store, or `None` if there is no such limit.
+    ///
+    /// This is either the engine's default, from
+    /// [`Config::max_component_instance_threads`], or the last value passed to
+    /// [`Store::set_max_component_instance_threads`].
+    ///
+    /// See [`Store::set_max_component_instance_threads`] for more details.
+    ///
+    /// [`Config::max_component_instance_threads`]: crate::Config::max_component_instance_threads
+    pub fn max_component_instance_threads(&self) -> Option<usize> {
+        self.as_context().0.max_component_instance_threads()
+    }
+
+    /// Sets the maximum number of live threads created by
+    /// `thread.new-indirect` permitted in each component instance in this
+    /// store.
+    ///
+    /// With the component model's cooperative threads a guest creates threads
+    /// through `thread.new-indirect` without host code in the loop. A created
+    /// thread holds host state until its start function returns, even if it is
+    /// never resumed, and no operation discards a thread that never started.
+    /// This limit caps those threads per top-level component instance, as a DoS
+    /// mitigation. A thread counts from the moment `thread.new-indirect`
+    /// creates it, whether or not it has started, until its start function
+    /// returns. Threads created in nested component instances count toward
+    /// their top-level instance.
+    ///
+    /// At the limit `thread.new-indirect` returns -1, which the component
+    /// model permits when a host runs out of resources, and creates no
+    /// thread: no host state is allocated and no handle is consumed. It does
+    /// not trap. Guests are expected to handle that result.
+    ///
+    /// Lowering the limit below the current count leaves live threads alone;
+    /// creation returns -1 until the count falls below the limit.
+    ///
+    /// A new store starts with the engine's
+    /// [`Config::max_component_instance_threads`], which defaults to `None`:
+    /// there is no per-instance limit, and threads are bounded only by
+    /// [`Store::set_max_component_handles`], exceeding which traps.
+    ///
+    /// [`Config::max_component_instance_threads`]: crate::Config::max_component_instance_threads
+    pub fn set_max_component_instance_threads(&mut self, limit: Option<usize>) {
+        self.as_context_mut()
+            .set_max_component_instance_threads(limit)
+    }
+
     /// Returns the underlying [`ResourceTable`] that the implementation of
     /// concurrency in the component model is using.
     ///
@@ -766,6 +828,16 @@ impl<T> StoreContextMut<'_, T> {
     /// See [`Store::set_max_component_handles`].
     pub fn set_max_component_handles(&mut self, limit: usize) {
         self.0.set_max_component_handles(limit)
+    }
+
+    /// See [`Store::max_component_instance_threads`].
+    pub fn max_component_instance_threads(&self) -> Option<usize> {
+        self.0.max_component_instance_threads()
+    }
+
+    /// See [`Store::set_max_component_instance_threads`].
+    pub fn set_max_component_instance_threads(&mut self, limit: Option<usize>) {
+        self.0.set_max_component_instance_threads(limit)
     }
 
     /// See [`Store::concurrent_resource_table`].

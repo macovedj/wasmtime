@@ -405,6 +405,13 @@ pub struct ComponentInstance {
     /// `Store` that this component belongs to.
     instances: TryPrimaryMap<RuntimeInstanceIndex, InstanceId>,
 
+    /// The number of live threads that `thread.new-indirect` created in this
+    /// top-level instance or any of its (sub-)component instances: created,
+    /// started or not, and not yet returned from their start function. It is
+    /// checked against `Store::max_component_instance_threads`.
+    #[cfg(feature = "component-model-async")]
+    live_explicit_threads: usize,
+
     /// Storage for the type information about resources within this component
     /// instance.
     resource_types: Arc<TryPrimaryMap<ResourceIndex, ResourceType>>,
@@ -613,6 +620,8 @@ impl ComponentInstance {
             offsets,
             instance_states,
             instances,
+            #[cfg(feature = "component-model-async")]
+            live_explicit_threads: 0,
             component: component.clone(),
             resource_types,
             imports: imports.clone(),
@@ -1201,6 +1210,15 @@ impl ComponentInstance {
         instance: RuntimeComponentInstanceIndex,
     ) -> &mut InstanceState {
         &mut self.instance_states().0[instance]
+    }
+
+    /// Returns the number of live threads `thread.new-indirect` created in
+    /// this top-level instance, for the creation limit to read and update.
+    #[cfg(feature = "component-model-async")]
+    pub fn live_explicit_threads_mut(self: Pin<&mut Self>) -> &mut usize {
+        // safety: we've chosen the `pin` guarantee of `self` to not apply to
+        // this count.
+        unsafe { &mut self.get_unchecked_mut().live_explicit_threads }
     }
 
     /// Returns the destructor and instance flags for the specified resource

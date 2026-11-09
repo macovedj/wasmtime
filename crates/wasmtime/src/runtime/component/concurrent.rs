@@ -2643,10 +2643,20 @@ impl StoreOpaque {
         state.take_next_switch_item()?;
         let thread_data = state.get_mut(guest_thread.thread)?;
         let sync_call_set = thread_data.sync_call_set;
+        let counted_in = thread_data.counted_in;
         if let Some(guest_id) = thread_data.instance_rep {
             self.instance_state(runtime_instance)
                 .thread_handle_table()
                 .guest_thread_remove(guest_id)?;
+        }
+        if let Some(instance) = counted_in {
+            let live = self
+                .component_instance_mut(instance)
+                .live_explicit_threads_mut();
+            *live = match live.checked_sub(1) {
+                Some(n) => n,
+                None => bail_bug!("live explicit thread count underflow"),
+            };
         }
         let state = self.concurrent_state_mut()?;
 
@@ -4279,6 +4289,15 @@ impl Instance {
             bail!(Trap::ThreadNewIndirectInvalidType);
         }
 
+        // At the store's per-instance limit, refuse with -1 (the canonical
+        // ABI's resource-exhaustion result) before allocating anything.
+        if let Some(limit) = store.0.max_component_instance_threads()
+            && *self.id().get_mut(store.0).live_explicit_threads_mut() >= limit
+        {
+            log::trace!("refusing new thread: the instance holds its limit of {limit} threads");
+            return Ok(u32::MAX);
+        }
+
         let token = StoreToken::new(store.as_context_mut());
         let start_func = Box::new(
             move |store: &mut dyn VMStore, guest_thread: QualifiedThreadId| -> Result<()> {
@@ -4326,7 +4345,19 @@ impl Instance {
 
         log::trace!("new thread with id {thread_id:?} created");
 
-        self.add_guest_thread_to_instance_table(thread_id, store.0, runtime_instance)
+        let guest_id =
+            self.add_guest_thread_to_instance_table(thread_id, store.0, runtime_instance)?;
+
+        // Count the thread against its top-level instance until its start
+        // function returns; `cleanup_thread` takes it off again.
+        *self.id().get_mut(store.0).live_explicit_threads_mut() += 1;
+        store
+            .0
+            .concurrent_state_mut()?
+            .get_mut(thread_id)?
+            .counted_in = Some(self.id().instance());
+
+        Ok(guest_id)
     }
 
     pub(crate) fn resume_thread(
@@ -5495,6 +5526,10 @@ pub struct GuestThread {
     /// The old value of `do_not_suspend` prior to the sync-typed task for which
     /// this thread was created, if relevant.
     old_do_not_suspend: Option<bool>,
+    /// The top-level component instance whose live explicit thread count
+    /// includes this thread, or `None` if it is not counted (implicit
+    /// threads).
+    counted_in: Option<ComponentInstanceId>,
 }
 
 impl GuestThread {
@@ -5524,6 +5559,7 @@ impl GuestThread {
             instance_rep: None,
             sync_call_set,
             old_do_not_suspend: None,
+            counted_in: None,
         })
     }
 
@@ -5547,6 +5583,7 @@ impl GuestThread {
             instance_rep: None,
             sync_call_set,
             old_do_not_suspend: None,
+            counted_in: None,
         })
     }
 }

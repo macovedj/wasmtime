@@ -197,6 +197,8 @@ pub struct Config {
     pub(crate) x86_float_abi_ok: Option<bool>,
     pub(crate) shared_memory: bool,
     pub(crate) rr_config: RRConfig,
+    #[cfg(feature = "component-model")]
+    pub(crate) max_component_instance_threads: Option<usize>,
 }
 
 /// User-provided configuration for the compiler.
@@ -317,6 +319,8 @@ impl Config {
             x86_float_abi_ok: None,
             shared_memory: false,
             rr_config: RRConfig::None,
+            #[cfg(feature = "component-model")]
+            max_component_instance_threads: None,
         };
         ret.wasm_backtrace_details(WasmBacktraceDetails::Environment);
         ret
@@ -1455,6 +1459,27 @@ impl Config {
     #[cfg(feature = "component-model-async")]
     pub fn wasm_component_model_threading(&mut self, enable: bool) -> &mut Self {
         self.wasm_features(WasmFeatures::CM_THREADING, enable);
+        self
+    }
+
+    /// Configures the limit on live threads created by `thread.new-indirect`
+    /// in each top-level component instance, which every [`Store`] created
+    /// with this configuration's engine starts with.
+    ///
+    /// See [`Store::set_max_component_instance_threads`] for what the limit
+    /// counts and what creation does at it. A store can change its own limit
+    /// there. This setting is read only when a store is created, not during
+    /// compilation, so it does not change
+    /// [`Engine::precompile_compatibility_hash`].
+    ///
+    /// By default this is `None`: stores start with no per-instance limit.
+    ///
+    /// [`Store`]: crate::Store
+    /// [`Store::set_max_component_instance_threads`]: crate::Store::set_max_component_instance_threads
+    /// [`Engine::precompile_compatibility_hash`]: crate::Engine::precompile_compatibility_hash
+    #[cfg(feature = "component-model")]
+    pub fn max_component_instance_threads(&mut self, limit: Option<usize>) -> &mut Self {
+        self.max_component_instance_threads = limit;
         self
     }
 
