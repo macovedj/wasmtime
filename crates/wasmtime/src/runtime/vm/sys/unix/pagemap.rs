@@ -1,4 +1,4 @@
-//! Module for Linux pagemap based tracking of dirty pages.
+//! Module for Linux pagemap based tracking of pages that may contain changed data.
 //!
 //! For other platforms, a no-op implementation is provided.
 
@@ -136,7 +136,7 @@ impl PageMap {
 /// this function will perform a scan of `ptr` for `len` bytes which will search
 /// for pages that:
 ///
-/// * Have been written.
+/// * Are present or swapped.
 /// * Are NOT backed by the "zero" page.
 /// * Are NOT backed by a "file" page.
 ///
@@ -169,18 +169,12 @@ impl PageMap {
 /// Putting this all together this helps explain the search criteria for
 /// `PAGEMAP_SCAN`, notably:
 ///
-/// * `Categories::WRITTEN` - if a page was only read by the guest no need to
-///   take a look at it as the contents aren't changed from the initial image.
-///   Note that this is not paired with `Categories::PRESENT`: a page the
-///   kernel has swapped out is not present but still holds the previous
-///   instance's contents, so it must be reset (which pages it back in) or
-///   decommitted like any other dirty page.
-///
 /// * `Categories::PRESENT | Categories::SWAPPED` (either) - the page must
-///   actually be backed by something. `WRITTEN` alone is not enough as it
-///   seems to precisely mean "not userfaultfd write-protected". By ensuring a
-///   page is present or swapped it means that there's actually something behind
-///   a PTE.
+///   actually have contents, either in memory or swap. An untouched page has
+///   neither flag. A swapped page can still hold the previous instance's data
+///   and must be reset or decommitted. `WRITTEN` cannot be used here: newer
+///   kernels only report it for userfaultfd write-protected mappings, which
+///   Wasmtime does not register.
 ///
 /// * `!Categories::PFNZERO` - if a page is mapped to the zero page then it's
 ///   guaranteed to be readonly and it means that wasm read the memory but
@@ -197,8 +191,8 @@ impl PageMap {
 /// the scan was halted. A scan can stop for 3 reasons:
 ///
 /// * The end of the region of memory being scanned was reached. In this case
-///   the entire region was scanned meaning that all dirty memory was reported
-///   through `reset_manually`. This means that `decommit` can be skipped
+///   the entire region was scanned meaning that all pages needing reset were
+///   reported through `reset_manually`. This means that `decommit` can be skipped
 ///   entirely (or invoked with a 0 length here which will also end up with it
 ///   being skipped).
 ///
@@ -225,10 +219,10 @@ impl PageMap {
 ///
 /// In the end this ends up being a "more clever" version of this function than
 /// the one in the `pagemap_disabled` module. By using `PAGEMAP_SCAN` we can
-/// search for the first `keep_resident` bytes of dirty memory written to by a
-/// wasm guest instead of assuming the first `keep_resident` bytes of the region
-/// were modified by the guest. This crucially enables the `decommit` operation
-/// to a noop if the wasm guest's set of working memory is less than
+/// search for the first `keep_resident` bytes of populated private memory
+/// instead of assuming the first `keep_resident` bytes of the region may have
+/// been modified by the guest. This crucially enables the `decommit` operation
+/// to a noop if the private working set is less than
 /// `keep_resident` which means that `memcpy` is sufficient to reset a linear
 /// memory or table. This directly translates to higher throughput as it avoids
 /// IPIs and synchronization updating page tables and additionally avoids page
@@ -307,17 +301,11 @@ pub unsafe fn reset_with_pagemap(
             // or backed by files. Such pages mean that they haven't changed
             // from their original contents, so they're inverted.
             .category_inverted(Categories::PFNZERO | Categories::FILE)
-            // Search for pages that are written as those are the dirty pages —
-            // whether they are present or have been swapped out: a dirty page
-            // in swap is not PRESENT but still holds the previous instance's
-            // data, and requiring PRESENT would leave it in place for the
-            // next instance (observed under memory pressure as heap
-            // corruption in the guest). Additionally search for the zero
-            // page/file page as those are inverted above meaning we're
-            // searching for pages that specifically don't have those flags.
-            .category_mask(Categories::WRITTEN | Categories::PFNZERO | Categories::FILE)
-            // ... but only pages that actually exist, either in memory or in
-            // swap.
+            // Exclude zero and file-backed pages, whose contents still match
+            // the original mapping. Do not require WRITTEN: newer kernels only
+            // report it for userfaultfd write-protected mappings.
+            .category_mask(Categories::PFNZERO | Categories::FILE)
+            // Include only pages with contents, either in memory or in swap.
             .category_anyof_mask(Categories::PRESENT | Categories::SWAPPED)
             // Don't return any categories back. This helps group regions
             // together since the reported set of categories is always empty
@@ -690,9 +678,8 @@ mod tests {
     use std::fs::File;
     use std::ptr;
 
-    /// Pages backed by something, in memory or in swap. Paired with
-    /// `WRITTEN` in scans because newer kernels also report never-touched
-    /// ptes as `WRITTEN`; see `reset_with_pagemap`.
+    /// Pages backed by something, in memory or in swap. This excludes
+    /// never-touched pages, which need no reset.
     const POPULATED: Categories = Categories::PRESENT.union(Categories::SWAPPED);
 
     struct MmapAnonymous {
@@ -771,7 +758,6 @@ mod tests {
             ioctl(
                 &fd,
                 PageMapScanBuilder::new(mmap.region())
-                    .category_mask(Categories::WRITTEN)
                     .category_anyof_mask(POPULATED)
                     .return_mask(Categories::all())
                     .build(results.spare_capacity_mut()),
@@ -793,7 +779,6 @@ mod tests {
             ioctl(
                 &fd,
                 PageMapScanBuilder::new(mmap.region())
-                    .category_mask(Categories::WRITTEN)
                     .category_anyof_mask(POPULATED)
                     .return_mask(Categories::all())
                     .build(results.spare_capacity_mut()),
@@ -846,9 +831,8 @@ mod tests {
             ioctl(
                 &fd,
                 PageMapScanBuilder::new(mmap.region())
-                    .category_mask(Categories::WRITTEN)
                     .category_anyof_mask(POPULATED)
-                    .return_mask(Categories::WRITTEN | Categories::PRESENT | Categories::PFNZERO)
+                    .return_mask(Categories::PRESENT | Categories::PFNZERO)
                     .build(results.spare_capacity_mut()),
             )
             .unwrap()
@@ -858,30 +842,30 @@ mod tests {
         assert_eq!(result.regions()[0].region(), mmap.page_region(0..1));
         assert_eq!(
             result.regions()[0].categories(),
-            Categories::WRITTEN | Categories::PRESENT | Categories::PFNZERO
+            Categories::PRESENT | Categories::PFNZERO
         );
 
         assert_eq!(result.regions()[1].region(), mmap.page_region(1..3));
         assert_eq!(
             result.regions()[1].categories(),
-            Categories::WRITTEN | Categories::PRESENT
+            Categories::PRESENT
         );
 
         assert_eq!(result.regions()[2].region(), mmap.page_region(3..4));
         assert_eq!(
             result.regions()[2].categories(),
-            Categories::WRITTEN | Categories::PRESENT | Categories::PFNZERO
+            Categories::PRESENT | Categories::PFNZERO
         );
 
         assert_eq!(result.regions()[3].region(), mmap.page_region(5..7));
         assert_eq!(
             result.regions()[3].categories(),
-            Categories::WRITTEN | Categories::PRESENT | Categories::PFNZERO
+            Categories::PRESENT | Categories::PFNZERO
         );
     }
 
     #[test]
-    fn only_written_pages() {
+    fn only_populated_private_pages() {
         if !ioctl_supported() {
             return;
         }
@@ -901,10 +885,10 @@ mod tests {
             ioctl(
                 &fd,
                 PageMapScanBuilder::new(mmap.region())
-                    .category_inverted(Categories::PFNZERO)
-                    .category_mask(Categories::WRITTEN | Categories::PFNZERO)
+                    .category_inverted(Categories::PFNZERO | Categories::FILE)
+                    .category_mask(Categories::PFNZERO | Categories::FILE)
                     .category_anyof_mask(POPULATED)
-                    .return_mask(Categories::WRITTEN | Categories::PRESENT | Categories::PFNZERO)
+                    .return_mask(Categories::PRESENT | Categories::PFNZERO | Categories::FILE)
                     .build(results.spare_capacity_mut()),
             )
             .unwrap()
@@ -915,7 +899,7 @@ mod tests {
         assert_eq!(result.regions()[0].region(), mmap.page_region(1..3));
         assert_eq!(
             result.regions()[0].categories(),
-            Categories::WRITTEN | Categories::PRESENT
+            Categories::PRESENT
         );
     }
 
@@ -933,13 +917,13 @@ mod tests {
         mmap.read(2);
         mmap.write(3);
 
-        // Ask for written|pfnzero meaning only-read pages. This should return only
-        // a single region of the first page.
+        // Reporting PFNZERO separates the read-only zero page from the
+        // private page after it. The one-region buffer stops at the first page.
         let result = unsafe {
             ioctl(
                 &fd,
                 PageMapScanBuilder::new(mmap.region())
-                    .return_mask(Categories::WRITTEN | Categories::PFNZERO)
+                    .return_mask(Categories::PFNZERO)
                     .build(results.spare_capacity_mut()),
             )
             .unwrap()
@@ -950,17 +934,15 @@ mod tests {
         assert_eq!(result.regions()[0].region(), mmap.page_region(0..1));
         assert_eq!(
             result.regions()[0].categories(),
-            Categories::WRITTEN | Categories::PFNZERO
+            Categories::PFNZERO
         );
 
-        // If we ask for written and present pages though then all touched
-        // pages should be in one region. Note that `WRITTEN` alone isn't
-        // enough to end the region on recent kernels.
+        // Reporting only PRESENT groups all four touched pages into one region.
         let result = unsafe {
             ioctl(
                 &fd,
                 PageMapScanBuilder::new(mmap.region())
-                    .return_mask(Categories::WRITTEN | Categories::PRESENT)
+                    .return_mask(Categories::PRESENT)
                     .build(results.spare_capacity_mut()),
             )
             .unwrap()
@@ -971,7 +953,7 @@ mod tests {
         assert_eq!(result.regions()[0].region(), mmap.page_region(0..4));
         assert_eq!(
             result.regions()[0].categories(),
-            Categories::WRITTEN | Categories::PRESENT
+            Categories::PRESENT
         );
     }
 
@@ -989,13 +971,12 @@ mod tests {
         mmap.read(2);
         mmap.read(3);
 
-        // Ask for written|pfnzero meaning only-read pages. This should return only
-        // a single region of the first page.
+        // The page limit stops after the first two zero-backed pages.
         let result = unsafe {
             ioctl(
                 &fd,
                 PageMapScanBuilder::new(mmap.region())
-                    .return_mask(Categories::WRITTEN | Categories::PFNZERO)
+                    .return_mask(Categories::PFNZERO)
                     .max_pages(2)
                     .build(results.spare_capacity_mut()),
             )
@@ -1007,7 +988,7 @@ mod tests {
         assert_eq!(result.regions()[0].region(), mmap.page_region(0..2));
         assert_eq!(
             result.regions()[0].categories(),
-            Categories::WRITTEN | Categories::PFNZERO
+            Categories::PFNZERO
         );
     }
 
@@ -1024,15 +1005,13 @@ mod tests {
         mmap.read(2);
         mmap.read(3);
 
-        // Ask for written|pfnzero meaning only-read pages. This should return only
-        // a single region of the first page.
+        // Only populated pages are returned; the hole between them is skipped.
         let result = unsafe {
             ioctl(
                 &fd,
                 PageMapScanBuilder::new(mmap.region())
-                    .category_mask(Categories::WRITTEN)
                     .category_anyof_mask(POPULATED)
-                    .return_mask(Categories::WRITTEN | Categories::PFNZERO)
+                    .return_mask(Categories::PFNZERO)
                     .max_pages(2)
                     .build(results.spare_capacity_mut()),
             )
@@ -1044,12 +1023,12 @@ mod tests {
         assert_eq!(result.regions()[0].region(), mmap.page_region(0..1));
         assert_eq!(
             result.regions()[0].categories(),
-            Categories::WRITTEN | Categories::PFNZERO
+            Categories::PFNZERO
         );
         assert_eq!(result.regions()[1].region(), mmap.page_region(2..3));
         assert_eq!(
             result.regions()[1].categories(),
-            Categories::WRITTEN | Categories::PFNZERO
+            Categories::PFNZERO
         );
     }
 
@@ -1133,7 +1112,7 @@ mod tests {
         assert!(all_zero(&mmap));
     }
 
-    /// Dirty pages that the kernel paged out are `WRITTEN` but not `PRESENT`;
+    /// Private pages that the kernel paged out are `SWAPPED` but not `PRESENT`;
     /// they must be reset all the same. `MADV_PAGEOUT` is best effort (it
     /// needs swap to actually evict), so this test proves the point on hosts
     /// with swap and degrades to the ordinary reset elsewhere.

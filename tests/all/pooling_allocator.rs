@@ -1428,6 +1428,44 @@ fn pagemap_scan_enabled_or_disabled() -> Result<()> {
 
 #[test]
 #[cfg_attr(miri, ignore)]
+fn pagemap_scan_resets_reused_memory() -> Result<()> {
+    fn check(scan: Enabled) -> Result<()> {
+        let mut pool = crate::small_pool_config();
+        // Two wasm pages keep the scan active even with a 64 KiB host page.
+        pool.total_core_instances(1)
+            .max_memory_size(2 << 16)
+            .linear_memory_keep_resident(2 << 16)
+            .pagemap_scan(scan);
+        let mut config = Config::new();
+        config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+        let engine = Engine::new(&config)?;
+        let module = Module::new(&engine, r#"(module (memory (export "m") 2))"#)?;
+
+        {
+            let mut store = Store::new(&engine, ());
+            let instance = Instance::new(&mut store, &module, &[])?;
+            let memory = instance.get_memory(&mut store, "m").unwrap();
+            memory.data_mut(&mut store)[0] = 0x5a;
+            memory.data_mut(&mut store)[1 << 16] = 0xa5;
+        }
+
+        let mut store = Store::new(&engine, ());
+        let instance = Instance::new(&mut store, &module, &[])?;
+        let memory = instance.get_memory(&mut store, "m").unwrap();
+        assert_eq!(memory.data(&store)[0], 0);
+        assert_eq!(memory.data(&store)[1 << 16], 0);
+        Ok(())
+    }
+
+    check(Enabled::Auto)?;
+    if PoolingAllocationConfig::is_pagemap_scan_available() {
+        check(Enabled::Yes)?;
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
 fn pooling_reuse_resets() -> Result<()> {
     let mut config = Config::new();
     let mut cfg = crate::small_pool_config();

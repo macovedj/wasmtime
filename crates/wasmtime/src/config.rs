@@ -4809,8 +4809,8 @@ impl PoolingAllocationConfig {
     /// [`Self::table_keep_resident`] options are configured to nonzero values
     /// the default behavior is to `memset` the lowest addresses of a table or
     /// memory back to their original contents. With the `PAGEMAP_SCAN` ioctl on
-    /// Linux this can be done to more intelligently scan for resident pages in
-    /// the region and only reset those pages back to their original contents
+    /// Linux this can be done to more intelligently scan for populated private
+    /// pages in the region and only reset those pages back to their original contents
     /// with `memset` rather than assuming the low addresses are all resident.
     ///
     /// This ioctl has the potential to provide a number of performance benefits
